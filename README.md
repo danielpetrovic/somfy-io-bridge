@@ -48,7 +48,7 @@ Install it in Home Assistant first: Settings → Apps → search "ESPHome" → I
 ## Setup
 
 1. **Hardware**: LilyGO TTGO T3 LoRa32 **868MHz** V1.6.1 - nothing else needed. Pin mapping (confirmed against the official schematic) lives in `components/iohc/iohc_board_config.h`.
-2. **Place this bridge's files** - `somfy-io-bridge.yaml`, `somfy-io-cover.yaml`, and `components/iohc/` - under `/config/esphome/` on your Home Assistant instance. Any app that lets you browse/edit files under `/config` works for this - Studio Code Server, File Editor, or a Samba/SSH share to your PC are all fine.
+2. **Place this bridge's files** - `somfy-io-bridge.yaml` and `somfy-io-cover.yaml` - under `/config/esphome/` on your Home Assistant instance. Any app that lets you browse/edit files under `/config` works for this - Studio Code Server, File Editor, or a Samba/SSH share to your PC are all fine. `components/iohc/` doesn't need copying anywhere - `somfy-io-bridge.yaml`'s `external_components:` points straight at this repo on GitHub, so ESPHome fetches it automatically at compile time.
 3. **Secrets**: add `wifi_ssid`, `wifi_password`, `io_bridge_api_key`, and `io_bridge_ota_password` to `secrets.yaml` under `/config/esphome/`. Two ways to get the values:
 
    #### Normal flow (recommended)
@@ -266,8 +266,8 @@ All of the above confirmed working against real motors, including pairing/unpair
 
 - `somfy-io-bridge.yaml`: the device config (radio setup, Wi-Fi/API/OTA, OLED display, diagnostic entities (WiFi Signal, Uptime, Loop Time, Restart Reason, Restart), configuration entities (Display, Display Brightness, Display Page Interval), Debug Logging / Channel Hop (2W) control switches, and one `packages:` entry per physical cover).
 - `somfy-io-cover.yaml`: reusable package template (cover + Program button + My button + Identify/Start/Stop Identify buttons + Get Name (2W) button + Mode select + Target Closure sensor + Last RSSI sensor), instantiated per cover via substitution variables (`cover_id`, `cover_name`, `device_class`, `node`, `key`, `broadcast_type`, `motor_address` - see [Real position feedback](#real-position-feedback-passive-2w-decode)).
-- `components/iohc/`: the local `external_component`.
-  - Flat directory (no subdirectories except `cover/`, `button/`, `select/`, `sensor/` - the only structure ESPHome's local-component loader actually supports) - see the comment in `iohc.h` for why.
+- `components/iohc/`: this repo's own `external_component` - fetched automatically via `external_components: type: git` in `somfy-io-bridge.yaml` (see Setup above), no manual copying needed.
+  - Flat directory (no subdirectories except `cover/`, `button/`, `select/`, `sensor/`) - matches both git-source's auto-detection (`components/` at the repo root) and, historically, the only structure ESPHome's local-component loader supports, if you ever switch back to `type: local` for local development - see the comment in `iohc.h` for why.
   - `iohcRadio.*`, `iohcPacket.*`, `SX1276Helpers.*`, `sx1276Regs-Fsk.h`, `TickerUsESP32.*`, `Delegate.h`: vendored radio/protocol layer, near-verbatim from upstream.
   - `iohc_remote1w.*`: the command/pairing layer (Add/Remove/Open/Close/Stop/Vent/Position/Identify), rewritten around ESPHome's `Preferences`-backed persistence instead of upstream's JSON-file + MQTT model.
   - `iohc_blind_position.*`: the local travel-time position estimator, fixed 25s open/close, used only for the cosmetic "still moving" animation in `Position` mode (see [Modes](#modes)).
