@@ -147,9 +147,7 @@ logger:
   initial_level: INFO
 
 external_components:
-  - source:
-      type: local
-      path: components
+  - source: github://danielpetrovic/somfy-io-bridge
 
 iohc:
   id: iohc_hub
