@@ -293,19 +293,22 @@ Not a from-scratch reimplementation - built on other people's protocol reverse-e
 - Also cross-checked against [`nicolas5000/io-rts-esp32`](https://github.com/nicolas5000/io-rts-esp32) - a second, independent working implementation, used to add the required `DISCOVER_CONFIRMATION` (`0x2C`→`0x2D`) bonding step neither this project nor `laberning/home_io_control` had, add Listen-Before-Talk RF collision avoidance, and fix a second crypto bug in the key-transfer IV construction. Again, no code copied verbatim - only the confirmed protocol/algorithm details.
 - The vendored/ported files live in `components/iohc/` with their original copyright headers intact - see the comment at the top of each file for what was ported near-verbatim versus rewritten for ESPHome (also summarized under [Files](#files) above).
 
-### How this repository differs from rspaargaren/iohomecontrol directly
+### How this repository relates to other io-homecontrol implementations
 
-If you've come across [rspaargaren/iohomecontrol](https://github.com/rspaargaren/iohomecontrol) separately and are wondering whether it's just a different way to install the same thing: it isn't. The two are genuinely different projects to install and run day-to-day, even though one is built on the other's protocol work:
+If you've come across `rspaargaren/iohomecontrol` or `laberning/home_io_control` separately and are wondering how they compare:
 
-| | rspaargaren/iohomecontrol | This repository |
-|---|---|---|
-| What it is | Standalone Arduino/PlatformIO firmware | ESPHome `external_component` |
-| How you install/flash it | Compile and flash yourself (Arduino IDE or PlatformIO) | Flash via Home Assistant's own ESPHome app - see [Before you start](#before-you-start) |
-| How it talks to Home Assistant | MQTT (with MQTT discovery) | ESPHome's native API (auto-discovered, encrypted, no MQTT broker needed) |
-| Radio/protocol layer | Original implementation | Ported near-verbatim from this project |
-| Scope | Broader - both 1W and 2W, OLED, web server, its own pairing UI | 1W only so far - see [Scope and status](#scope-and-status) |
+| | rspaargaren/iohomecontrol | laberning/home_io_control | This repository |
+|---|---|---|---|
+| What it is | Standalone firmware | ESPHome component | ESPHome component |
+| Install/flash | Compile yourself (Arduino/PlatformIO) | ESPHome (HA app or standalone) | Home Assistant's ESPHome app |
+| Talks to HA via | MQTT | ESPHome native API | ESPHome native API |
+| Radio layer | Original | Original | Ported from rspaargaren |
+| 2W bonding | Not confirmed working here | **Confirmed working** on real hardware | Implemented, never succeeded - see [status](#2w-bonding-current-status-and-open-problem) |
+| Scope | Broad - 1W+2W, OLED, web server | Broad - multiple device types, real 2W | 1W stable/daily use; 2W control implemented, bonding unresolved |
 
-Only the protocol/radio-level pieces were ported (packet framing, CRC/AES handling, position estimation); the MQTT layer, web server, and Arduino `main.cpp` structure were not - this repository's bridge runs entirely inside ESPHome's own component/lifecycle model instead.
+`laberning/home_io_control` is itself built on a third project, [`nicolas5000/io-rts-esp32`](https://github.com/nicolas5000/io-rts-esp32) (per its own Acknowledgments) - not an independent peer implementation, so it isn't listed as its own column here. This repo separately cross-checked its own crypto and bonding sequence against `nicolas5000/io-rts-esp32` directly too (see [Credits](#credits--attribution)) - if working 2W bonding matters to you today, either of those two has actually achieved it, this repo hasn't yet.
+
+Only the protocol/radio-level pieces were ported from rspaargaren/iohomecontrol specifically (packet framing, CRC/AES handling, position estimation); its MQTT layer, web server, and Arduino `main.cpp` structure were not - this repository's bridge runs entirely inside ESPHome's own component/lifecycle model instead.
 
 ## License
 
