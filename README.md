@@ -269,17 +269,21 @@ This bridge's own SX1276 driver and 1W layer (`iohcRadio.*`, `iohcPacket.*`, `SX
 
 If you've come across any of these separately and are wondering how they compare - and specifically, how much of this repository actually comes from `rspaargaren` versus the other two:
 
-| | rspaargaren/iohomecontrol | nicolas5000/io-rts-esp32 | laberning/home_io_control | This repository |
+| | rspaargaren | nicolas5000 | laberning | This repo |
 |---|---|---|---|---|
-| What it is | Standalone Arduino/PlatformIO firmware | Standalone ESP-IDF firmware | ESPHome component | ESPHome component |
-| Install/flash | Compile yourself | Compile yourself (ESP-IDF/VSCode) | ESPHome (HA app or standalone) | Home Assistant's ESPHome app |
-| Talks to HA via | MQTT | MQTT, or CLI (no HA integration) | ESPHome native API | ESPHome native API |
-| SX1276 driver origin | Original (built on Velocet/cridp's protocol docs + register work) | Original | Built on nicolas5000's driver/protocol work (per its own Acknowledgments) | Ported from rspaargaren (same "layered origin" pattern as laberning/nicolas5000 - see above) |
-| 1W bonding | Implemented, but author calls it "obsolete" and no longer supports it | Not implemented - only passively overhears 1W traffic, to extract remote IDs/site keys | Not implemented - only passively overhears 1W traffic, to fire HA automation events | **Implemented, confirmed stable, daily production use** |
-| 1W control | Implemented (Open/Close/Stop/Position) | Not implemented | Not implemented | **Implemented, confirmed stable, daily production use** (`Position` and `Open / My / Close` modes) |
-| 2W bonding | Implemented, but author calls it "unstable" after 1W-focused rework | **Confirmed working** | **Confirmed working** | Implemented (protocol/crypto verified against both), never succeeded on real hardware |
-| 2W control | Implemented (bundled with the above instability) | **Confirmed working, including real position feedback** | **Confirmed working, including real position feedback** | Implemented (byte-verified against both), untestable until bonding works - `Two-Way (Experimental)` mode |
-| Scope | Broad - 1W+2W, OLED, web server | Broad - 2W multi-device-type, CLI, MQTT, Ethernet | Broad - multiple device types, real 2W, tilt, device rename | 1W bonding/control: stable, daily use. 2W control: implemented, blocked entirely on bonding (see [status](#2w-bonding-current-status-and-open-problem)) |
+| What it is | Standalone firmware | Standalone firmware | ESPHome component | ESPHome component |
+| Install | Compile yourself | Compile yourself | ESPHome | HA's ESPHome app |
+| Talks to HA via | MQTT | MQTT/CLI | Native API | Native API |
+| Radio driver | Original | Original | Built on nicolas5000 | Ported from rspaargaren¹ |
+| 1W bonding | Implemented, unsupported | Passive-only² | Passive-only² | **Implemented, stable** |
+| 1W control | Implemented | Not implemented | Not implemented | **Implemented, stable** |
+| 2W bonding | Implemented, "unstable" | **Confirmed working** | **Confirmed working** | Implemented, not yet working |
+| 2W control | Implemented | **Confirmed, w/ position** | **Confirmed, w/ position** | Implemented, blocked on bonding |
+| Scope | Broad - 1W+2W, OLED, web | Broad - 2W, CLI, Ethernet | Broad - multi-device, tilt | 1W stable; 2W blocked³ |
+
+¹ Same "layered origin" pattern as laberning building on nicolas5000 - see above, not a claim this repo copies rspaargaren wholesale.
+² Only passively overhears 1W traffic (nicolas5000: to extract remote IDs/site keys; laberning: to fire HA automation events) - neither actively bonds/controls over 1W.
+³ This repo's 1W modes are `Position` and `Open / My / Close`; 2W is `Two-Way (Experimental)` - see [Modes](#modes). 2W control is implemented and byte-verified against both nicolas5000 and laberning, but blocked entirely on bonding, which has never succeeded here - see [status](#2w-bonding-current-status-and-open-problem).
 
 The practical upshot: none of the three reference projects offer stable 1W bonding/control the way this one does (rspaargaren has it but disclaims support for it; the other two skip it entirely and only listen passively) - that's this project's own strongest, most-tested feature. Conversely, both `nicolas5000/io-rts-esp32` and `laberning/home_io_control` have working 2W bonding today; this repository's own 2W bonding attempt has not yet succeeded against real hardware despite the corrected protocol/crypto - if working 2W matters to you right now, either of those two has actually achieved it.
 
