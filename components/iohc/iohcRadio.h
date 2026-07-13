@@ -84,12 +84,32 @@ namespace IOHC {
             static volatile bool txComplete;
             //static void setPreambleLength(uint16_t preambleLen);
 
+            // Minimum gap enforced between the start of one queued send batch
+            // and the next, regardless of how many covers/automations queue
+            // commands at once - see startQueuedSend()'s own comment for why.
+            // Called from IOHCComponent::loop() so a batch that arrives while
+            // still cooling down gets retried automatically once it elapses,
+            // rather than only being drained by the next unrelated send().
+            void startQueuedSend();
+
         private:
             iohcRadio();
             bool receive(bool stats);
             bool sent(iohcPacket *packet);
             void queueSend(std::vector<iohcPacket*> &iohcTx);
-            void startQueuedSend();
+
+            static uint32_t last_send_started_us_;
+            // Real-world incident (2026-07-13): an automation opened ~13
+            // covers at once with no inter-command delay. This bridge's own
+            // TX queue drained them back-to-back as fast as the radio could
+            // physically send, with zero gap between different motors'
+            // commands - the resulting RF burst put multiple motors into an
+            // error state that even TaHoma's own (unrelated) controller
+            // could no longer command, until the board was rebooted. This
+            // constant is a bridge-side backstop so that no automation
+            // mistake can reproduce this - independent of any pacing at the
+            // automation layer.
+            static constexpr uint32_t MIN_INTER_SEND_US = 500000;  // 500ms
 
             static iohcRadio *_iohcRadio;
             static uint8_t _flags[2];

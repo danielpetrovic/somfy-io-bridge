@@ -31,6 +31,7 @@ namespace IOHC {
     iohcRadio *iohcRadio::_iohcRadio = nullptr;
     volatile unsigned long iohcRadio::_g_payload_millis = 0L;
     uint8_t iohcRadio::_flags[2] = {0, 0};
+    uint32_t iohcRadio::last_send_started_us_ = 0;
     volatile bool iohcRadio::send_lock = false;
     volatile iohcRadio::RadioState iohcRadio::radioState = iohcRadio::RadioState::IDLE;
     volatile bool iohcRadio::txComplete = false;
@@ -339,6 +340,18 @@ void iohcRadio::startQueuedSend() {
     if (radioState == RadioState::TX || packets2send.size() > 0 || sendQueue.empty()) {
         return;
     }
+
+    // Enforce a minimum gap since the last batch started, regardless of how
+    // many are already queued - see the field's own comment in iohcRadio.h.
+    // Returning here (rather than sending immediately) is safe: this is
+    // called every IOHCComponent::loop() tick as well as from send(), so a
+    // batch that's still cooling down gets retried automatically within one
+    // tick of the cooldown elapsing.
+    uint32_t now_us = esp_timer_get_time();
+    if (now_us - last_send_started_us_ < MIN_INTER_SEND_US) {
+        return;
+    }
+    last_send_started_us_ = now_us;
 
     packets2send = std::move(sendQueue.front());
     sendQueue.pop();

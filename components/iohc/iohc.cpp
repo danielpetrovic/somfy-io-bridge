@@ -36,6 +36,13 @@ void IOHCComponent::loop() {
   // iohc_controller2w.cpp's loop().
   controller2w_.loop();
   maybe_hop_();
+  // Drains one queued send batch if the radio is idle and the minimum
+  // inter-send cooldown has elapsed - see iohcRadio::startQueuedSend()'s own
+  // comment. Also called directly from iohcRadio::send(), so this is what
+  // catches a batch that arrived while still cooling down and retries it
+  // once the cooldown passes, rather than leaving it stuck until some
+  // unrelated new send() happens to come in.
+  IOHC::iohcRadio::getInstance()->startQueuedSend();
 }
 
 void IOHCComponent::maybe_hop_() {
