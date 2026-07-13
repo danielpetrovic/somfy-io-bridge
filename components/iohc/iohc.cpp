@@ -116,6 +116,10 @@ bool IOHCComponent::on_receive(IOHC::iohcPacket *packet) {
   ESP_LOGI(TAG, "Frame #%u received, length=%u, rssi=%.1f dBm", this->packets_received_, packet->buffer_length,
            packet->rssi);
 
+  if (!passive_decode_wanted_) {
+    return false;
+  }
+
   // This bridge's own 2W bonding (Phase 3) - only ever consumes a frame
   // while a bonding attempt is armed AND the frame's source matches that
   // attempt's specific target motor (see IOHCController2W::handle_frame()),

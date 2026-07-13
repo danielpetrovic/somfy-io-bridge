@@ -90,6 +90,20 @@ class IOHCComponent : public Component {
   void set_manual_hop_wanted(bool wanted);
   void set_bonding_hop_wanted(bool wanted);
 
+  // Diagnostic toggle (2026-07-13 incident): when false, on_receive() skips
+  // ALL passive processing of received frames (2W position/RSSI decode, key
+  // sniffer, controller2w's own frame handling) right after the packet
+  // counter - the bridge still transmits 1W commands normally, but stops
+  // continuously decoding every frame on the channel the way it normally
+  // does. Real Situo remotes don't do this at all. Added to test whether
+  // this bridge's own continuous RX/decode load - not present on a Situo -
+  // is what's colliding with TaHoma's own concurrent polling of motors.
+  // Defaults false: with only one real user of this bridge right now,
+  // stability takes priority over the Target Closure/Last RSSI sensors this
+  // disables by default - turn on explicitly to get passive decode back.
+  void set_passive_decode_wanted(bool wanted) { passive_decode_wanted_ = wanted; }
+  bool passive_decode_wanted() const { return passive_decode_wanted_; }
+
  protected:
   void maybe_hop_();
   void hop_wanted_changed_();
@@ -97,6 +111,7 @@ class IOHCComponent : public Component {
   uint8_t hop_channel_idx_{0};
   bool manual_hop_wanted_{false};
   bool bonding_hop_wanted_{false};
+  bool passive_decode_wanted_{false};
   std::string fixed_controller_hex_;
   std::string fixed_system_key_hex_;
 

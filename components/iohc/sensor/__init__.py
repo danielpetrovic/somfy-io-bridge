@@ -32,6 +32,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import sensor
 from esphome.const import (
+    CONF_EXPIRE_AFTER,
     CONF_TYPE,
     DEVICE_CLASS_SIGNAL_STRENGTH,
     ENTITY_CATEGORY_DIAGNOSTIC,
@@ -50,19 +51,31 @@ CONF_COVER_ID = "cover_id"
 TYPE_TARGET_CLOSURE = "target_closure"
 TYPE_RSSI = "rssi"
 
+# expire_after: neither sensor is pushed on a fixed schedule - both only
+# update when a frame happens to be overheard (from an external box, or not
+# at all while Passive Decode (2W) is off) - so with no expiry, either would
+# silently show a stale-but-plausible-looking last value forever instead of
+# going unavailable. This project's own steady-state at-rest polling
+# interval was never fully characterized - the ~20s figure elsewhere in this
+# codebase is specifically the right-after-a-move backoff, not the at-rest
+# cadence, which could plausibly be 30-60min for a shutter nobody's touched.
+# 90 minutes gives real margin above that uncertain upper bound so normal
+# quiet periods don't falsely flip these to unavailable.
+_EXPIRE_AFTER_DEFAULT = "90min"
+
 SENSOR_SCHEMAS = {
     TYPE_TARGET_CLOSURE: sensor.sensor_schema(
         unit_of_measurement=UNIT_PERCENT,
         accuracy_decimals=0,
         state_class=STATE_CLASS_MEASUREMENT,
-    ),
+    ).extend({cv.Optional(CONF_EXPIRE_AFTER, default=_EXPIRE_AFTER_DEFAULT): cv.All(cv.positive_time_period_milliseconds)}),
     TYPE_RSSI: sensor.sensor_schema(
         unit_of_measurement=UNIT_DECIBEL_MILLIWATT,
         accuracy_decimals=1,
         device_class=DEVICE_CLASS_SIGNAL_STRENGTH,
         state_class=STATE_CLASS_MEASUREMENT,
         entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-    ),
+    ).extend({cv.Optional(CONF_EXPIRE_AFTER, default=_EXPIRE_AFTER_DEFAULT): cv.All(cv.positive_time_period_milliseconds)}),
 }
 
 CONFIG_SCHEMA = cv.typed_schema(

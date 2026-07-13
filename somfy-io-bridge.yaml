@@ -415,6 +415,28 @@ switch:
           format: "Channel Hop (2W) turned OFF - RX back to CH2 only"
           level: WARN
       - lambda: id(iohc_hub).set_manual_hop_wanted(false);
+  # Diagnostic (2026-07-13): stays OFF by default - this bridge does NOT
+  # continuously decode every received frame (passive 2W position/RSSI, key
+  # sniffer) out of the box, only transmits 1W commands, closer to how a
+  # real Situo remote behaves. Turn ON explicitly to opt into passive 2W
+  # decode (the Target Closure/Last RSSI sensors) - added to test whether
+  # this bridge's own continuous RX load, which a Situo never has, is what
+  # collided with TaHoma's own concurrent polling in the 2026-07-13 incident.
+  - platform: template
+    name: "Passive Decode (2W)"
+    icon: mdi:radio-tower
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - logger.log:
+          format: "Passive Decode (2W) turned ON - decoding all received frames"
+          level: WARN
+      - lambda: id(iohc_hub).set_passive_decode_wanted(true);
+    turn_off_action:
+      - logger.log:
+          format: "Passive Decode (2W) turned OFF - only transmitting, not decoding received frames"
+          level: WARN
+      - lambda: id(iohc_hub).set_passive_decode_wanted(false);
   # Blanks the OLED without cutting power - useful for a wall-mounted unit at
   # night, and reduces long-term burn-in. Reflects real hardware state
   # (is_on()), not just an assumed toggle.
