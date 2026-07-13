@@ -83,20 +83,6 @@ button:
     cover_id: ${cover_id}
     type: prog2w
     entity_category: config
-  # Opt-in diagnostic, not part of bonding itself (confirmed via
-  # laberning/home_io_control's own pairing_engine.cpp that naming is out
-  # of scope for its pairing sequence too) - sends GET_NAME (0x50) to this
-  # cover's already-bonded motor and logs whatever name comes back. A real
-  # reply is strong end-to-end confirmation the whole crypto chain works,
-  # not just that bonding completed. Requires Program (2W) to have already
-  # succeeded - refuses otherwise.
-  - platform: iohc
-    id: ${cover_id}_get_name2w
-    name: "Get Name (2W)"
-    device_id: ${cover_id}_device
-    cover_id: ${cover_id}
-    type: get_name2w
-    entity_category: diagnostic
   # Direct My button - sends Vent (main=0xd8), the real My/favorite-position
   # command (confirmed via a live TaHoma capture), and updates the cover's
   # own displayed position/state the same way the position-slider path does.
@@ -142,29 +128,3 @@ select:
     name: "Mode"
     device_id: ${cover_id}_device
     cover_id: ${cover_id}
-
-sensor:
-  # Standalone real-position sensor, matching Overkiz's own "Target closure"
-  # convention exactly (0=open, 100=closed - see README's "Real position
-  # feedback" section). Only ever publishes once real 2W traffic for this
-  # cover's motor_address has actually been overheard - stays unavailable
-  # otherwise (e.g. if motor_address wasn't set, or no compatible 2W
-  # controller like TaHoma exists on this installation).
-  - platform: iohc
-    id: ${cover_id}_target_closure
-    name: "Target Closure"
-    device_id: ${cover_id}_device
-    cover_id: ${cover_id}
-    type: target_closure
-  # THIS bridge's own radio's signal strength for the last frame received
-  # from this motor - distinct from Overkiz's "RSSI Level" sensor, which
-  # reflects TaHoma's radio, not ours. Updates on any received frame (1W or
-  # 2W, decoded or not), so it works even for a cover that's never been
-  # 2W-bonded or passively decoded - only requires motor_address to be set.
-  - platform: iohc
-    id: ${cover_id}_last_rssi
-    name: "Last RSSI"
-    device_id: ${cover_id}_device
-    cover_id: ${cover_id}
-    type: rssi
-    entity_category: diagnostic

@@ -208,19 +208,6 @@ namespace IOHC {
 
         bool is_bonded(const IOHC::address &motor_address) const;
 
-        // Opt-in diagnostic (not part of bonding itself - confirmed via
-        // laberning/home_io_control's own pairing_engine.cpp that naming is
-        // deliberately out of scope for its discover_and_pair() sequence
-        // too, just a hardcoded placeholder logged for the operator to edit
-        // by hand). Sends GET_NAME (0x50, crypto-wrapped, same
-        // challenge/response shape as an ordinary command) to an
-        // already-bonded motor and logs whatever name comes back - a real
-        // 0x51 reply is a strong end-to-end confirmation the whole crypto
-        // chain (derived system_key, challenge/response) actually works,
-        // not just that bonding completed. No-op with a warning if not
-        // bonded yet, or if a command is already in flight.
-        void send_get_name(const IOHC::address &to);
-
         // Passive 2W key sniffing (Findings 27/28/31) - address-agnostic and
         // hub-scoped: unlike arm_bonding(), does not target one specific
         // motor. Watches every 2W frame this bridge overhears, from anyone,
@@ -229,8 +216,7 @@ namespace IOHC {
         // handle_frame() - no separate arm/disarm step anymore. Now that RX
         // coverage across all 3 channels is the bridge-wide default
         // (Finding 31), there's no reliability cost to running this
-        // continuously, the same way the existing Target Closure/RSSI
-        // decode already runs continuously. If a complete sequence is
+        // continuously. If a complete sequence is
         // captured, the derived system_key is logged (hex, ESP_LOGW so it's
         // never missed even with Debug Logging off) - there is no dedicated
         // HA entity for it.
@@ -255,11 +241,6 @@ namespace IOHC {
         void send_key_init(const IOHC::address &to);
         void send_key_transfer(const IOHC::address &to, const uint8_t *challenge6);
         void send_set_config1(const IOHC::address &to);
-        // Best-effort, fire-and-forget (see _p0x52's own comment in
-        // iohcPacket.h for why this isn't wrapped in challenge/response).
-        // Truncates name to 15 chars + a trailing NUL, matching the
-        // confirmed 16-byte real payload shape.
-        void send_set_name(const IOHC::address &to, const std::string &name);
 
         // Listen-Before-Talk (Finding 22) - checks RSSI is below threshold
         // before a 2W transmission, backing off briefly and re-checking up

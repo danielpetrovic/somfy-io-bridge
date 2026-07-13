@@ -40,13 +40,6 @@ void IOHCCover::setup() {
     remote_.position_tracker().setPosition(this->position * 100.0f);
   }
 
-  if (has_motor_address_) {
-    parent_->register_cover_for_position_updates(motor_address_, this);
-  }
-
-  if (target_closure_sensor_ != nullptr && cover_prefs_.isKey("target_closure")) {
-    target_closure_sensor_->publish_state(cover_prefs_.getFloat("target_closure", 0.0f));
-  }
 }
 
 void IOHCCover::set_motor_address(const std::string &motor_address_hex) {
@@ -54,25 +47,6 @@ void IOHCCover::set_motor_address(const std::string &motor_address_hex) {
     return;
   hexStringToBytes(motor_address_hex, motor_address_);
   has_motor_address_ = true;
-}
-
-void IOHCCover::update_real_position(float closure_percent) {
-  // Only touches the standalone sensor, never this->position/
-  // current_operation/the tracker - passively decoded frames aren't
-  // validated (no CRC in the RX pipeline), so a bad decode must not be able
-  // to corrupt the entity actually used for control.
-  closure_percent = std::clamp(closure_percent, 0.0f, 100.0f);
-  ESP_LOGI(TAG, "Target Closure sensor updated from passive 2W decode: %.0f%%", closure_percent);
-  if (target_closure_sensor_ != nullptr) {
-    target_closure_sensor_->publish_state(closure_percent);
-  }
-  cover_prefs_.putFloat("target_closure", closure_percent);
-}
-
-void IOHCCover::update_last_rssi(float rssi_dbm) {
-  if (last_rssi_sensor_ != nullptr) {
-    last_rssi_sensor_->publish_state(rssi_dbm);
-  }
 }
 
 void IOHCCover::update_real_position_authoritative(float closure_percent) {
@@ -84,10 +58,6 @@ void IOHCCover::update_real_position_authoritative(float closure_percent) {
   this->current_operation = cover::COVER_OPERATION_IDLE;
   target_position_ = -1.0f;
   cover_prefs_.putFloat("position", open_percent);
-  if (target_closure_sensor_ != nullptr) {
-    target_closure_sensor_->publish_state(closure_percent);
-  }
-  cover_prefs_.putFloat("target_closure", closure_percent);
   this->publish_state();
 }
 
@@ -175,15 +145,6 @@ void IOHCCover::press_prog2w() {
     return;
   }
   parent_->controller2w().arm_bonding(motor_address_, this);
-}
-
-void IOHCCover::press_get_name2w() {
-  if (!has_motor_address_) {
-    ESP_LOGW(TAG, "Get Name (2W) pressed but this cover has no motor_address configured - see README's Real "
-                  "position feedback section for how to look it up.");
-    return;
-  }
-  parent_->controller2w().send_get_name(motor_address_);
 }
 
 void IOHCCover::control(const cover::CoverCall &call) {

@@ -16,7 +16,6 @@
 #include "iohcRadio.h"
 #include "iohc_controller2w.h"
 #include <string>
-#include <unordered_map>
 
 namespace esphome {
 namespace iohc {
@@ -31,12 +30,6 @@ class IOHCComponent : public Component {
   float get_setup_priority() const override { return setup_priority::HARDWARE; }
 
   bool on_receive(IOHC::iohcPacket *packet);
-
-  // Passive 2W position sync (see README's "Real position feedback" section).
-  // motor_address is the shutter's REAL address - as assigned by Somfy at
-  // pairing time - packed the same way as address_rssi_'s keys. Called by
-  // IOHCCover::setup() when motor_address is configured.
-  void register_cover_for_position_updates(const IOHC::address &motor_address, IOHCCover *cover);
 
   // This bridge's own 2W bonding/control (Phase 3) - one shared instance for
   // the whole bridge, see iohc_controller2w.h. Distinct from the passive
@@ -91,16 +84,16 @@ class IOHCComponent : public Component {
   void set_bonding_hop_wanted(bool wanted);
 
   // Diagnostic toggle (2026-07-13 incident): when false, on_receive() skips
-  // ALL passive processing of received frames (2W position/RSSI decode, key
-  // sniffer, controller2w's own frame handling) right after the packet
-  // counter - the bridge still transmits 1W commands normally, but stops
-  // continuously decoding every frame on the channel the way it normally
-  // does. Real Situo remotes don't do this at all. Added to test whether
-  // this bridge's own continuous RX/decode load - not present on a Situo -
-  // is what's colliding with TaHoma's own concurrent polling of motors.
-  // Defaults false: with only one real user of this bridge right now,
-  // stability takes priority over the Target Closure/Last RSSI sensors this
-  // disables by default - turn on explicitly to get passive decode back.
+  // ALL passive processing of received frames (controller2w's own bonding/
+  // key-sniffer frame handling) right after the packet counter - the bridge
+  // still transmits 1W commands normally, but stops continuously decoding
+  // every frame on the channel the way it normally does. Real Situo remotes
+  // don't do this at all. Added to test whether this bridge's own
+  // continuous RX/decode load - not present on a Situo - is what's
+  // colliding with TaHoma's own concurrent polling of motors. Defaults
+  // false: with only one real user of this bridge right now, stability
+  // takes priority - turn on explicitly to get 2W bonding/key-sniff
+  // processing back.
   void set_passive_decode_wanted(bool wanted) { passive_decode_wanted_ = wanted; }
   bool passive_decode_wanted() const { return passive_decode_wanted_; }
 
@@ -117,25 +110,8 @@ class IOHCComponent : public Component {
 
   IOHC::IOHCController2W controller2w_;
   // Total received frame count, any source - only used for the debug log
-  // line in on_receive() (frame numbering), no HA-facing consumer anymore
-  // (removed from the OLED status page in favor of per-motor RSSI on each
-  // cover's own page).
+  // line in on_receive() (frame numbering).
   uint32_t packets_received_{0};
-
-  // Per-source-address RSSI for EVERY address ever heard, logged only (not
-  // exposed as HA entities) - most senders are foreign/unregistered (other
-  // remotes, TaHoma itself), not known ahead of time, so a fixed sensor per
-  // entry here would be unbounded and mostly meaningless. Packed as
-  // (source[0]<<16 | source[1]<<8 | source[2]) - see on_receive(). For the
-  // specific subset of addresses that ARE known ahead of time (a cover's own
-  // configured motor_address), see position_covers_ below and
-  // IOHCCover::update_last_rssi() - that's the one exposed as a real sensor.
-  std::unordered_map<uint32_t, float> address_rssi_;
-
-  // Motor address (packed the same way) -> the cover to notify when a real
-  // position for that motor is passively decoded. Only covers with
-  // motor_address set are registered here.
-  std::unordered_map<uint32_t, IOHCCover *> position_covers_;
 };
 
 }  // namespace iohc

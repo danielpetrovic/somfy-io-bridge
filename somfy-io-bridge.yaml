@@ -409,40 +409,43 @@ switch:
   # otherwise. Safe to combine with Debug Logging or an active
   # Program (2W) bonding attempt, which requests the hop independently.
   - platform: template
-    name: "Channel Hop (2W)"
+    name: "Debug Channel Hop (2W)"
     icon: mdi:swap-horizontal
     optimistic: true
     restore_mode: ALWAYS_OFF
     turn_on_action:
       - logger.log:
-          format: "Channel Hop (2W) turned ON - RX now sweeping CH1/CH2/CH3"
+          format: "Debug Channel Hop (2W) turned ON - RX now sweeping CH1/CH2/CH3"
           level: WARN
       - lambda: id(iohc_hub).set_manual_hop_wanted(true);
     turn_off_action:
       - logger.log:
-          format: "Channel Hop (2W) turned OFF - RX back to CH2 only"
+          format: "Debug Channel Hop (2W) turned OFF - RX back to CH2 only"
           level: WARN
       - lambda: id(iohc_hub).set_manual_hop_wanted(false);
   # Diagnostic (2026-07-13): stays OFF by default - this bridge does NOT
-  # continuously decode every received frame (passive 2W position/RSSI, key
-  # sniffer) out of the box, only transmits 1W commands, closer to how a
-  # real Situo remote behaves. Turn ON explicitly to opt into passive 2W
-  # decode (the Target Closure/Last RSSI sensors) - added to test whether
-  # this bridge's own continuous RX load, which a Situo never has, is what
-  # collided with TaHoma's own concurrent polling in the 2026-07-13 incident.
+  # continuously decode every received frame (2W bonding-attempt handling,
+  # key sniffer) out of the box, only transmits 1W commands, closer to how a
+  # real Situo remote behaves. Turn ON explicitly to opt into that
+  # processing - added to test whether this bridge's own continuous RX load,
+  # which a Situo never has, is what collided with TaHoma's own concurrent
+  # polling in the 2026-07-13 incident. The Target Closure/Last RSSI sensors
+  # this switch used to also gate were removed entirely (not just disabled)
+  # rather than half-ship unstable diagnostic sensors ahead of real 2W
+  # control - see the plan file's Phase 3 section.
   - platform: template
-    name: "Passive Decode (2W)"
+    name: "Debug Passive Decode (2W)"
     icon: mdi:radio-tower
     optimistic: true
     restore_mode: ALWAYS_OFF
     turn_on_action:
       - logger.log:
-          format: "Passive Decode (2W) turned ON - decoding all received frames"
+          format: "Debug Passive Decode (2W) turned ON - decoding all received frames"
           level: WARN
       - lambda: id(iohc_hub).set_passive_decode_wanted(true);
     turn_off_action:
       - logger.log:
-          format: "Passive Decode (2W) turned OFF - only transmitting, not decoding received frames"
+          format: "Debug Passive Decode (2W) turned OFF - only transmitting, not decoding received frames"
           level: WARN
       - lambda: id(iohc_hub).set_passive_decode_wanted(false);
   # Blanks the OLED without cutting power - useful for a wall-mounted unit at
@@ -529,16 +532,10 @@ font:
     id: my_font
     size: 14
 
-# Per-cover pages: name on line 1; line 2 has this bridge's own local/HA
-# position on the left and the real motor-reported position (from the
-# Target Closure sensor, converted from closure% to the same open%
-# convention as the left side) on the right; line 3 has this bridge's own
-# last-heard RSSI for that motor. The right-side real position and the RSSI
-# line both only ever show a value once real 2W traffic for that cover's
-# motor_address has actually been overheard (see README's "Real position
-# feedback" and "Last RSSI sensor" sections) - has_state() guards each one
-# and falls back to "--" otherwise, e.g. for a cover with no motor_address
-# configured at all, which never registers for either sensor.
+# Per-cover pages: name on line 1, this bridge's own local/HA position on
+# line 2. Real motor-reported position and per-motor RSSI display used to be
+# on line 3 (from the now-removed Target Closure/Last RSSI sensors) - pulled
+# entirely, see the "Debug Passive Decode (2W)" switch's own comment.
 display:
   - platform: ssd1306_i2c
     id: oled
@@ -552,198 +549,58 @@ display:
         lambda: |-
           it.printf(0, 0, id(my_font), "Bedroom Left");
           it.printf(0, 20, id(my_font), "%.0f%%", id(bedroom_left_shutter_io)->position * 100.0f);
-          if (id(bedroom_left_shutter_io_target_closure)->has_state()) {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "%.0f%%", 100.0f - id(bedroom_left_shutter_io_target_closure)->state);
-          } else {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "--");
-          }
-          if (id(bedroom_left_shutter_io_last_rssi)->has_state()) {
-            it.printf(0, 40, id(my_font), "RSSI: %.0fdBm", id(bedroom_left_shutter_io_last_rssi)->state);
-          } else {
-            it.printf(0, 40, id(my_font), "RSSI: --");
-          }
       - id: page_bedroom_middle
         lambda: |-
           it.printf(0, 0, id(my_font), "Bedroom Middle");
           it.printf(0, 20, id(my_font), "%.0f%%", id(bedroom_middle_shutter_io)->position * 100.0f);
-          if (id(bedroom_middle_shutter_io_target_closure)->has_state()) {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "%.0f%%", 100.0f - id(bedroom_middle_shutter_io_target_closure)->state);
-          } else {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "--");
-          }
-          if (id(bedroom_middle_shutter_io_last_rssi)->has_state()) {
-            it.printf(0, 40, id(my_font), "RSSI: %.0fdBm", id(bedroom_middle_shutter_io_last_rssi)->state);
-          } else {
-            it.printf(0, 40, id(my_font), "RSSI: --");
-          }
       - id: page_bedroom_right
         lambda: |-
           it.printf(0, 0, id(my_font), "Bedroom Right");
           it.printf(0, 20, id(my_font), "%.0f%%", id(bedroom_right_shutter_io)->position * 100.0f);
-          if (id(bedroom_right_shutter_io_target_closure)->has_state()) {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "%.0f%%", 100.0f - id(bedroom_right_shutter_io_target_closure)->state);
-          } else {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "--");
-          }
-          if (id(bedroom_right_shutter_io_last_rssi)->has_state()) {
-            it.printf(0, 40, id(my_font), "RSSI: %.0fdBm", id(bedroom_right_shutter_io_last_rssi)->state);
-          } else {
-            it.printf(0, 40, id(my_font), "RSSI: --");
-          }
       - id: page_gameroom_left
         lambda: |-
           it.printf(0, 0, id(my_font), "Gameroom Left");
           it.printf(0, 20, id(my_font), "%.0f%%", id(gameroom_left_shutter_io)->position * 100.0f);
-          if (id(gameroom_left_shutter_io_target_closure)->has_state()) {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "%.0f%%", 100.0f - id(gameroom_left_shutter_io_target_closure)->state);
-          } else {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "--");
-          }
-          if (id(gameroom_left_shutter_io_last_rssi)->has_state()) {
-            it.printf(0, 40, id(my_font), "RSSI: %.0fdBm", id(gameroom_left_shutter_io_last_rssi)->state);
-          } else {
-            it.printf(0, 40, id(my_font), "RSSI: --");
-          }
       - id: page_gameroom_right
         lambda: |-
           it.printf(0, 0, id(my_font), "Gameroom Right");
           it.printf(0, 20, id(my_font), "%.0f%%", id(gameroom_right_shutter_io)->position * 100.0f);
-          if (id(gameroom_right_shutter_io_target_closure)->has_state()) {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "%.0f%%", 100.0f - id(gameroom_right_shutter_io_target_closure)->state);
-          } else {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "--");
-          }
-          if (id(gameroom_right_shutter_io_last_rssi)->has_state()) {
-            it.printf(0, 40, id(my_font), "RSSI: %.0fdBm", id(gameroom_right_shutter_io_last_rssi)->state);
-          } else {
-            it.printf(0, 40, id(my_font), "RSSI: --");
-          }
       - id: page_garden
         lambda: |-
           it.printf(0, 0, id(my_font), "Garden");
           it.printf(0, 20, id(my_font), "%.0f%%", id(garden_shutter_io)->position * 100.0f);
-          if (id(garden_shutter_io_target_closure)->has_state()) {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "%.0f%%", 100.0f - id(garden_shutter_io_target_closure)->state);
-          } else {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "--");
-          }
-          if (id(garden_shutter_io_last_rssi)->has_state()) {
-            it.printf(0, 40, id(my_font), "RSSI: %.0fdBm", id(garden_shutter_io_last_rssi)->state);
-          } else {
-            it.printf(0, 40, id(my_font), "RSSI: --");
-          }
       - id: page_gym
         lambda: |-
           it.printf(0, 0, id(my_font), "Gym");
           it.printf(0, 20, id(my_font), "%.0f%%", id(gym_shutter_io)->position * 100.0f);
-          if (id(gym_shutter_io_target_closure)->has_state()) {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "%.0f%%", 100.0f - id(gym_shutter_io_target_closure)->state);
-          } else {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "--");
-          }
-          if (id(gym_shutter_io_last_rssi)->has_state()) {
-            it.printf(0, 40, id(my_font), "RSSI: %.0fdBm", id(gym_shutter_io_last_rssi)->state);
-          } else {
-            it.printf(0, 40, id(my_font), "RSSI: --");
-          }
       - id: page_hallway
         lambda: |-
           it.printf(0, 0, id(my_font), "Hallway");
           it.printf(0, 20, id(my_font), "%.0f%%", id(hallway_shutter_io)->position * 100.0f);
-          if (id(hallway_shutter_io_target_closure)->has_state()) {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "%.0f%%", 100.0f - id(hallway_shutter_io_target_closure)->state);
-          } else {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "--");
-          }
-          if (id(hallway_shutter_io_last_rssi)->has_state()) {
-            it.printf(0, 40, id(my_font), "RSSI: %.0fdBm", id(hallway_shutter_io_last_rssi)->state);
-          } else {
-            it.printf(0, 40, id(my_font), "RSSI: --");
-          }
       - id: page_kitchen
         lambda: |-
           it.printf(0, 0, id(my_font), "Kitchen");
           it.printf(0, 20, id(my_font), "%.0f%%", id(kitchen_shutter_io)->position * 100.0f);
-          if (id(kitchen_shutter_io_target_closure)->has_state()) {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "%.0f%%", 100.0f - id(kitchen_shutter_io_target_closure)->state);
-          } else {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "--");
-          }
-          if (id(kitchen_shutter_io_last_rssi)->has_state()) {
-            it.printf(0, 40, id(my_font), "RSSI: %.0fdBm", id(kitchen_shutter_io_last_rssi)->state);
-          } else {
-            it.printf(0, 40, id(my_font), "RSSI: --");
-          }
       - id: page_living_room
         lambda: |-
           it.printf(0, 0, id(my_font), "Living Room");
           it.printf(0, 20, id(my_font), "%.0f%%", id(living_room_shutter_io)->position * 100.0f);
-          if (id(living_room_shutter_io_target_closure)->has_state()) {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "%.0f%%", 100.0f - id(living_room_shutter_io_target_closure)->state);
-          } else {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "--");
-          }
-          if (id(living_room_shutter_io_last_rssi)->has_state()) {
-            it.printf(0, 40, id(my_font), "RSSI: %.0fdBm", id(living_room_shutter_io_last_rssi)->state);
-          } else {
-            it.printf(0, 40, id(my_font), "RSSI: --");
-          }
       - id: page_office
         lambda: |-
           it.printf(0, 0, id(my_font), "Office");
           it.printf(0, 20, id(my_font), "%.0f%%", id(office_shutter_io)->position * 100.0f);
-          if (id(office_shutter_io_target_closure)->has_state()) {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "%.0f%%", 100.0f - id(office_shutter_io_target_closure)->state);
-          } else {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "--");
-          }
-          if (id(office_shutter_io_last_rssi)->has_state()) {
-            it.printf(0, 40, id(my_font), "RSSI: %.0fdBm", id(office_shutter_io_last_rssi)->state);
-          } else {
-            it.printf(0, 40, id(my_font), "RSSI: --");
-          }
       - id: page_roof_terrace
         lambda: |-
           it.printf(0, 0, id(my_font), "Roof Terrace");
           it.printf(0, 20, id(my_font), "%.0f%%", id(roof_terrace_shutter_io)->position * 100.0f);
-          if (id(roof_terrace_shutter_io_target_closure)->has_state()) {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "%.0f%%", 100.0f - id(roof_terrace_shutter_io_target_closure)->state);
-          } else {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "--");
-          }
-          if (id(roof_terrace_shutter_io_last_rssi)->has_state()) {
-            it.printf(0, 40, id(my_font), "RSSI: %.0fdBm", id(roof_terrace_shutter_io_last_rssi)->state);
-          } else {
-            it.printf(0, 40, id(my_font), "RSSI: --");
-          }
       - id: page_shed_alleyway
         lambda: |-
           it.printf(0, 0, id(my_font), "Shed Alleyway");
           it.printf(0, 20, id(my_font), "%.0f%%", id(shed_alleyway_shutter_io)->position * 100.0f);
-          if (id(shed_alleyway_shutter_io_target_closure)->has_state()) {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "%.0f%%", 100.0f - id(shed_alleyway_shutter_io_target_closure)->state);
-          } else {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "--");
-          }
-          if (id(shed_alleyway_shutter_io_last_rssi)->has_state()) {
-            it.printf(0, 40, id(my_font), "RSSI: %.0fdBm", id(shed_alleyway_shutter_io_last_rssi)->state);
-          } else {
-            it.printf(0, 40, id(my_font), "RSSI: --");
-          }
       - id: page_shed_garden
         lambda: |-
           it.printf(0, 0, id(my_font), "Shed Garden");
           it.printf(0, 20, id(my_font), "%.0f%%", id(shed_garden_shutter_io)->position * 100.0f);
-          if (id(shed_garden_shutter_io_target_closure)->has_state()) {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "%.0f%%", 100.0f - id(shed_garden_shutter_io_target_closure)->state);
-          } else {
-            it.printf(128, 20, id(my_font), TextAlign::TOP_RIGHT, "--");
-          }
-          if (id(shed_garden_shutter_io_last_rssi)->has_state()) {
-            it.printf(0, 40, id(my_font), "RSSI: %.0fdBm", id(shed_garden_shutter_io_last_rssi)->state);
-          } else {
-            it.printf(0, 40, id(my_font), "RSSI: --");
-          }
       - id: page_status
         lambda: |-
           it.printf(0, 0, id(my_font), "Somfy IO Bridge");

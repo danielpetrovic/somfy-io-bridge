@@ -174,14 +174,6 @@ namespace IOHC {
         ESP_LOGI(TAG, "2W bonding with %02X%02X%02X succeeded - system key now shared", motor[0], motor[1],
                  motor[2]);
         send_set_config1(motor);
-        // Naming is deliberately not part of the protocol-level bonding
-        // sequence (confirmed via laberning/home_io_control's own
-        // pairing_engine.cpp - discover_and_pair() doesn't touch it
-        // either), but setting it here is a harmless, useful default so
-        // the motor's real name matches its ESPHome config. GET_NAME
-        // (send_get_name()) stays a separate, opt-in diagnostic action.
-        if (attempt_.armed_cover != nullptr)
-            send_set_name(motor, attempt_.armed_cover->get_name().c_str());
         attempt_.state = BondState::BONDED;
         attempt_.armed_cover = nullptr;
         if (owner_ != nullptr)
@@ -211,9 +203,8 @@ namespace IOHC {
 
         // Key sniffing (Finding 31) no longer needs any loop()-driven
         // hop/timeout management - it's a pure passive watcher inside
-        // handle_frame() now, same as the ordinary Target Closure decode.
-        // RX coverage across all 3 channels comes from the bridge-wide
-        // cooperative hop (esphome::iohc::IOHCComponent::maybe_hop_()).
+        // handle_frame() now. RX coverage across all 3 channels comes from
+        // the bridge-wide cooperative hop (esphome::iohc::IOHCComponent::maybe_hop_()).
 
         if (attempt_.state == BondState::IDLE || attempt_.state == BondState::BONDED) return;
 
@@ -411,49 +402,6 @@ namespace IOHC {
                  main1, to[0], to[1], to[2]);
     }
 
-    void IOHCController2W::send_get_name(const IOHC::address &to) {
-        Session2W &s = sessions_[pack_address(to)];
-        if (!s.bonded) {
-            ESP_LOGW(TAG, "GET_NAME to %02X%02X%02X refused - not bonded yet (Program (2W) first)", to[0], to[1],
-                     to[2]);
-            return;
-        }
-        if (s.cmd_state != CmdState::IDLE) {
-            ESP_LOGW(TAG, "GET_NAME to %02X%02X%02X still waiting on a previous command - ignoring", to[0], to[1],
-                     to[2]);
-            return;
-        }
-
-        auto *packet = new iohcPacket;
-        forge_2w_packet(packet, controller_address_, to);
-        packet->payload.packet.header.cmd = 0x50;
-        packet->buffer_length = packet->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
-        radio_->retune(CHANNEL2);
-        listen_before_talk();
-        radio_->send(packet);
-
-        s.last_sent_cmd = 0x50;
-        s.last_sent_data = {};
-        s.cmd_state = CmdState::SENT_WAITING_CHALLENGE;
-        s.cmd_sent_ms = esphome::millis();
-        s.pending_cmd_cover = nullptr;
-        ESP_LOGI(TAG, "Sent GET_NAME (0x50) to %02X%02X%02X - waiting for challenge/response", to[0], to[1], to[2]);
-    }
-
-    void IOHCController2W::send_set_name(const IOHC::address &to, const std::string &name) {
-        auto *packet = new iohcPacket;
-        forge_2w_packet(packet, controller_address_, to);
-        packet->payload.packet.header.CtrlByte1.asStruct.MsgLen += sizeof(_p0x52);
-        packet->payload.packet.header.cmd = 0x52;
-        memset(packet->payload.packet.msg.p0x52.name, 0, sizeof(_p0x52::name));
-        strncpy(packet->payload.packet.msg.p0x52.name, name.c_str(), sizeof(_p0x52::name) - 1);
-        packet->buffer_length = packet->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
-        radio_->retune(CHANNEL2);
-        listen_before_talk();
-        radio_->send(packet);
-        ESP_LOGI(TAG, "Sent SET_NAME (0x52) \"%s\" to %02X%02X%02X (best-effort)", name.c_str(), to[0], to[1], to[2]);
-    }
-
     bool IOHCController2W::handle_frame(IOHC::iohcPacket *packet) {
         // Passive key-sniff (Findings 27/28) - observes only, never
         // consumes/returns true, so it can never interfere with anything
@@ -554,27 +502,6 @@ namespace IOHC {
                         ESP_LOGI(TAG, "  real closure=%.0f%%", closure_percent);
                         cover->update_real_position_authoritative(closure_percent);
                     }
-                    return true;
-                }
-
-                // GET_NAME's answer (0x51) rather than an ordinary command's
-                // (0x04) - a real reply here is strong end-to-end
-                // confirmation of the whole crypto chain (derived
-                // system_key, challenge/response), not just that bonding
-                // completed. Logged at ESP_LOGW so it's never missed
-                // regardless of Debug Logging state, same discipline as the
-                // passive key-sniff success log.
-                if (s.cmd_state == CmdState::ANSWERED_WAITING_ACK && s.last_sent_cmd == 0x50 && cmd == 0x51 &&
-                    packet->buffer_length >= static_cast<int>(sizeof(_header) + sizeof(_p0x51))) {
-                    s.cmd_state = CmdState::IDLE;
-                    std::string name(packet->payload.packet.msg.p0x51.name, sizeof(_p0x51::name));
-                    // Truncate at the first NUL, if any, for a clean log line -
-                    // the real device otherwise pads with trailing garbage/
-                    // spaces up to the fixed 16-byte width.
-                    size_t nul_pos = name.find('\0');
-                    if (nul_pos != std::string::npos)
-                        name.resize(nul_pos);
-                    ESP_LOGW(TAG, "GET_NAME (0x51) from %02X%02X%02X: \"%s\"", src[0], src[1], src[2], name.c_str());
                     return true;
                 }
             }
