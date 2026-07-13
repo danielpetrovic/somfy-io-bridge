@@ -147,7 +147,15 @@ logger:
   initial_level: INFO
 
 external_components:
+  # refresh: 0s forces a fresh git fetch on every compile instead of the
+  # default 1d cache - this repo is under active development on this same
+  # install, so a stale day-old cache silently compiling against yesterday's
+  # code (while the YAML itself, read locally, is always current) is a real
+  # trap, not just a slower-than-ideal default. Worth reconsidering (e.g.
+  # pin to a released tag with the default cache) once 2W bonding work
+  # settles and this repo isn't changing multiple times a day.
   - source: github://danielpetrovic/somfy-io-bridge
+    refresh: 0s
 
 iohc:
   id: iohc_hub

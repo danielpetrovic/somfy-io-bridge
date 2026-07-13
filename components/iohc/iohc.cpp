@@ -94,6 +94,18 @@ void IOHCComponent::register_cover_for_position_updates(const IOHC::address &mot
 bool IOHCComponent::on_receive(IOHC::iohcPacket *packet) {
   this->packets_received_++;
 
+  // Guard moved here (2026-07-13, was originally further down, after the
+  // RSSI tracking/logging below - a real bug, since that left all of that
+  // per-frame work running regardless of the switch, defeating the point of
+  // testing whether continuous receive-side processing collides with
+  // TaHoma's own polling). Nothing below this line runs at all while the
+  // switch is off - not even RSSI tracking or the "Frame #N received" log -
+  // this is now the closest this bridge gets to behaving like a Situo,
+  // which does none of this on receive.
+  if (!passive_decode_wanted_) {
+    return false;
+  }
+
   uint32_t address = (static_cast<uint32_t>(packet->payload.packet.header.source[0]) << 16) |
                       (static_cast<uint32_t>(packet->payload.packet.header.source[1]) << 8) |
                       static_cast<uint32_t>(packet->payload.packet.header.source[2]);
@@ -115,10 +127,6 @@ bool IOHCComponent::on_receive(IOHC::iohcPacket *packet) {
 
   ESP_LOGI(TAG, "Frame #%u received, length=%u, rssi=%.1f dBm", this->packets_received_, packet->buffer_length,
            packet->rssi);
-
-  if (!passive_decode_wanted_) {
-    return false;
-  }
 
   // This bridge's own 2W bonding (Phase 3) - only ever consumes a frame
   // while a bonding attempt is armed AND the frame's source matches that
