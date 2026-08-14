@@ -158,6 +158,21 @@ Three extra buttons per cover - `<Cover Name> Identify`, `Start Identify`, `Stop
 
 No physical Somfy remote has an Identify button, so there was no confirmed 1W frame format to copy going in - what's implemented is a best-guess signed 1W frame built by matching the command byte (`cmd=0x1E`) and payload bytes seen in a real captured 2W TaHoma-to-motor exchange, wrapped in the same self-signed `data+sequence+hmac` structure this bridge's own Pair/Remove frames use (since a 1W broadcast has no live challenge/response round trip to lean on the way 2W does). That guess turned out correct - it works over 1W despite Identify itself only being documented/observed as a 2W (TaHoma) feature.
 
+## My and Set My
+
+`My` moves the cover to its motor-stored favorite position - height, and tilt where the motor supports it - the same as pressing My on a physical Situo remote. Two independently real-hardware-confirmed wire patterns exist, selected per-cover via the [Tilt Support switch](#tilt-support-switch) below:
+
+- **Simple** (off, default for shutters/shades) - a single frame, `main=0xd8`. Matches two independent real reference implementations ([`laberning/home_io_control`](https://github.com/laberning/home_io_control), [`nicolas5000/io-rts-esp32`](https://github.com/nicolas5000/io-rts-esp32)), and is what a plain roller shutter or shade (no tilt) needs.
+- **Extended** (on, default for blinds) - a 16-byte trigger frame followed by a two-frame confirmation burst, confirmed against a real Situo capture from a tilt-capable venetian blind - needed to reproduce tilt, which the simple pattern alone cannot. Confirmed *not* working on plain shutters already 2W-bonded to a TaHoma/Connexoon box, which is why this is a per-cover toggle rather than a single fixed pattern.
+
+Since no position value is ever transmitted for this command - the motor recalls whatever it has stored internally - there's no way to know in advance which direction the cover will move, or where it will end up. The displayed position and movement state are deliberately left unchanged after a My press rather than guessing: an incorrect guess would risk firing the wrong opening/closing automation trigger in Home Assistant, which is worse than showing no movement at all. Move the cover with `Position`/`Open`/`Close` first if you need the displayed position to stay accurate.
+
+`Set My` reprograms the motor's own stored favorite position to wherever the cover is currently physically sitting - the same real-world effect as holding My on a physical Situo remote for about 5 seconds. Move the cover to the desired position (and tilt, if applicable, via the physical remote) first, then press `Set My`. No position is transmitted here either, for the same reason - the motor samples its own current physical state, not a value sent to it. Both patterns are confirmed working end-to-end on real hardware (reprogram, then re-recall of the newly stored position).
+
+### Tilt Support switch
+
+Each cover has a **Tilt Support** switch (config entity) selecting which of the two `My`/`Set My` patterns above it uses - on for the extended/tilt-capable pattern, off for the simple pattern. Controlled by the `my_pattern` YAML substitution (`auto` (default) / `simple` / `extended`) on first-ever boot only - `auto` resolves from the cover's `device_class` (`blind` → on, everything else → off). Once toggled from Home Assistant, the choice persists on the device (survives reboots) and the YAML default no longer applies. Override it directly if a specific motor needs the other pattern despite its configured device class.
+
 ## Board-independent identity (surviving a board replacement)
 
 By default, each cover generates a **random** virtual remote identity (a 3-byte node address + 16-byte AES key) on first boot, stored only in that specific board's flash (NVS). If the board ever dies, a replacement would generate a *different* random identity, requiring every motor to be re-paired.
@@ -193,7 +208,7 @@ Generated the same way (`secrets.token_hex(3)`/`secrets.token_hex(16)`, or the t
 
 Each cover has a `select:` entity to switch between:
 - **`Position`** (default) - the only mode that sends arbitrary percentage targets to the motor. The motor itself executes these accurately (confirmed via passive 2W read-back across multiple physical devices/percentages); the displayed position while a move is in progress is a fixed 25s travel-time animation, purely cosmetic (not user-configurable - there's nothing to tune since it never affects where the motor actually ends up, only how long the UI shows "still moving").
-- **`Open / My / Close`** - three discrete states (0% closed / 50% "My" / 100% open), no time tracking, no arbitrary percentages - any position request strictly between 0 and 100 collapses to `Vent` (`main=0xd8`), the real My/favorite-position command, confirmed via a live capture of a real TaHoma "My" press. My and Stop are **not** the same command: the dedicated Stop action still sends `Stop` (`main=0xd2`), which (also confirmed via live capture) only has an effect while the motor is actively moving.
+- **`Open / My / Close`** - three discrete states (0% closed / 50% "My" / 100% open), no time tracking, no arbitrary percentages - any position request strictly between 0 and 100 collapses to the real My/favorite-position command (see [My and Set My](#my-and-set-my) below). My and Stop are **not** the same command: the dedicated Stop action still sends `Stop` (`main=0xd2`), which only has an effect while the motor is actively moving.
 - **`Two-Way (Experimental)`** - real 2W commands to an actually-bonded motor. The control path (per-command challenge/response, position feedback) is implemented and validated against real captured frames. This bridge's own bonding has never yet succeeded against real hardware, though - see [2W bonding: current status and open problem](#2w-bonding-current-status-and-open-problem) below for the full picture. Selecting this mode on an unbonded motor just logs a warning and ignores commands.
 
 ## 2W bonding: current status and open problem
@@ -221,7 +236,8 @@ If you've made progress on this, or have a working real bonding capture from a d
 **Implemented (1W, one-way commands):**
 - Real-time passive reception/decode of IO traffic (RSSI per source address, logged).
 - Pairing and unpairing via a single `Program` button, dispatching to `Add` (cmd `0x30`) or `Remove` (cmd `0x39`) based on this bridge's own persisted pairing status - matches how real Somfy remotes and Somfy's own official add/remove instructions actually work, see [Pairing](#pairing-and-unpairing-a-cover-to-its-motor) above.
-- Open / Close / Stop / My / absolute Position (0-100%) commands, confirmed working against real hardware. My and Stop are distinct commands (`Vent`/`main=0xd8` vs `Stop`/`main=0xd2`), confirmed via live captures of real TaHoma traffic.
+- Open / Close / Stop / My / absolute Position (0-100%) commands, confirmed working against real hardware. My and Stop are distinct commands - see [My and Set My](#my-and-set-my) above for My's two real, per-cover-selectable frame shapes ([Tilt Support switch](#tilt-support-switch)).
+- `Set My`, reprogramming the motor's own stored favorite position to the cover's current physical position - both patterns confirmed working end-to-end on real hardware, see [My and Set My](#my-and-set-my) above.
 - Identify / Start Identify / Stop Identify (`cmd=0x1E`) - best-guess frames, confirmed working against real hardware, see [Identify](#identify) above.
 - Per-cover selectable mode (`Position` / `Open / My / Close` / `Two-Way (Experimental)` - control path implemented, but this bridge's own 2W bonding has not yet succeeded against real hardware, see [Modes](#modes) above).
 
@@ -236,13 +252,13 @@ All of the above confirmed working against real motors, including pairing/unpair
 ## Files
 
 - `somfy-io-bridge.yaml`: the device config (radio setup, Wi-Fi/API/OTA, OLED display, diagnostic entities (WiFi Signal, Uptime, Loop Time, Restart Reason, Restart), configuration entities (Display, Display Brightness, Display Page Interval), Debug Logging / Debug Channel Hop (2W) / Debug Passive Decode (2W) control switches, and one `packages:` entry per physical cover).
-- `somfy-io-cover.yaml`: reusable package template (cover + Program button + My button + Identify/Start/Stop Identify buttons + Mode select), instantiated per cover via substitution variables (`cover_id`, `cover_name`, `device_class`, `node`, `key`, `broadcast_type`, `motor_address` - required for Program (2W)/Two-Way mode, see [Pairing](#pairing-and-unpairing-a-cover-to-its-motor)).
+- `somfy-io-cover.yaml`: reusable package template (cover + Program button + My button + Set My button + Identify/Start/Stop Identify buttons + Mode select + Tilt Support switch), instantiated per cover via substitution variables (`cover_id`, `cover_name`, `device_class`, `node`, `key`, `broadcast_type`, `motor_address` - required for Program (2W)/Two-Way mode, see [Pairing](#pairing-and-unpairing-a-cover-to-its-motor), `my_pattern` - see [Tilt Support switch](#tilt-support-switch)).
 - `components/iohc/`: this repo's own `external_component` - fetched automatically via `external_components: type: git` in `somfy-io-bridge.yaml` (see Setup above), no manual copying needed.
-  - Flat directory (no subdirectories except `cover/`, `button/`, `select/`) - matches both git-source's auto-detection (`components/` at the repo root) and, historically, the only structure ESPHome's local-component loader supports, if you ever switch back to `type: local` for local development - see the comment in `iohc.h` for why.
+  - Flat directory (no subdirectories except `cover/`, `button/`, `select/`, `switch/`) - matches both git-source's auto-detection (`components/` at the repo root) and, historically, the only structure ESPHome's local-component loader supports, if you ever switch back to `type: local` for local development - see the comment in `iohc.h` for why.
   - `iohcRadio.*`, `iohcPacket.*`, `SX1276Helpers.*`, `sx1276Regs-Fsk.h`, `TickerUsESP32.*`, `Delegate.h`: vendored radio/protocol layer, near-verbatim from upstream.
-  - `iohc_remote1w.*`: the command/pairing layer (Add/Remove/Open/Close/Stop/Vent/Position/Identify), rewritten around ESPHome's `Preferences`-backed persistence instead of upstream's JSON-file + MQTT model.
+  - `iohc_remote1w.*`: the command/pairing layer (Add/Remove/Open/Close/Stop/Vent/SetMy/Position/Identify), rewritten around ESPHome's `Preferences`-backed persistence instead of upstream's JSON-file + MQTT model.
   - `iohc_blind_position.*`: the local travel-time position estimator, fixed 25s open/close, used only for the cosmetic "still moving" animation in `Position` mode (see [Modes](#modes)).
-  - `cover/`, `button/`, `select/`: the ESPHome platform integration, selected via `type:`.
+  - `cover/`, `button/`, `select/`, `switch/`: the ESPHome platform integration. `button/` dispatches many entity types via its own `type:` field; `select/` and `switch/` each implement one entity type (Mode, Tilt Support).
 
 ## OLED display
 

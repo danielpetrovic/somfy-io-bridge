@@ -30,6 +30,16 @@ void IOHCCover::setup() {
   cover_prefs_namespace_ = cover_nvs_namespace_for(this->nvs_key_);
   cover_prefs_.begin(cover_prefs_namespace_.c_str(), false);
   mode_ = static_cast<Mode>(cover_prefs_.getUChar("mode", static_cast<uint8_t>(Mode::POSITION)));
+  // Live value the remote actually uses - falls back to the compile-time
+  // YAML-resolved seed only on first-ever boot (no persisted value yet).
+  // Set live via the My Pattern switch from here on - see
+  // set_my_pattern_extended() below. Key is "my_pattern_ext", NOT the
+  // more obvious "my_pattern_extended" - ESP32 NVS keys are capped at 15
+  // characters (confirmed the hard way, 2026-08-14: the switch appeared
+  // to toggle in HA but never actually persisted across a reboot, since
+  // both putBool()/getBool() on a 20-character key silently do nothing).
+  my_pattern_extended_ = cover_prefs_.getBool("my_pattern_ext", my_pattern_default_extended_);
+  remote_.set_my_pattern_extended(my_pattern_extended_);
 
   remote_.set_travel_time_open(TRAVEL_TIME_OPEN);
   remote_.set_travel_time_close(TRAVEL_TIME_CLOSE);
@@ -64,6 +74,12 @@ void IOHCCover::update_real_position_authoritative(float closure_percent) {
 void IOHCCover::set_mode(Mode mode) {
   mode_ = mode;
   cover_prefs_.putUChar("mode", static_cast<uint8_t>(mode));
+}
+
+void IOHCCover::set_my_pattern_extended(bool extended) {
+  my_pattern_extended_ = extended;
+  cover_prefs_.putBool("my_pattern_ext", extended); // 15-char NVS key limit - see setup()'s own comment
+  remote_.set_my_pattern_extended(extended);
 }
 
 void IOHCCover::loop() {

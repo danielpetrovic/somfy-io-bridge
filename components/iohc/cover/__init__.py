@@ -22,7 +22,7 @@ import re
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import cover
-from esphome.const import CONF_ID
+from esphome.const import CONF_DEVICE_CLASS, CONF_ID
 
 from .. import IOHCComponent, iohc_ns
 
@@ -35,6 +35,7 @@ CONF_MANUFACTURER = "manufacturer"
 CONF_NODE = "node"
 CONF_KEY = "key"
 CONF_MOTOR_ADDRESS = "motor_address"
+CONF_MY_PATTERN = "my_pattern"
 
 IOHCCover = iohc_ns.class_("IOHCCover", cover.Cover, cg.Component)
 
@@ -78,6 +79,23 @@ CONFIG_SCHEMA = cover.cover_schema(IOHCCover, device_class="shutter").extend(
         # leave unset if you don't have one, or don't want passive position
         # sync for this cover.
         cv.Optional(CONF_MOTOR_ADDRESS, default=""): validate_hex_string(6),
+        # Which real-hardware-confirmed My/Set My wire pattern this motor
+        # starts on - see IOHC::RemoteButton::Vent/SetMy's own comments in
+        # iohc_remote1w.h for what each does and why both are genuinely
+        # confirmed-working, just for different device types. "auto" (the
+        # default) resolves from device_class below: "blind" (tilt-capable)
+        # gets "extended" (the only pattern that reproduces tilt, GitHub
+        # issue #1); anything else gets "simple" (matches two independent
+        # real reference implementations, and is what plain shutters/shades
+        # need - "extended" was confirmed NOT working on plain shutters
+        # already 2W-bonded to a TaHoma/Connexoon box, root cause still
+        # unclear). Override explicitly if a specific motor needs the other
+        # pattern despite its device_class. This is only a first-boot seed,
+        # not a hard lock - the per-cover My Pattern switch (config
+        # entity, components/iohc/switch/) can flip it live from Home
+        # Assistant afterward without reflashing; once toggled, the
+        # persisted NVS value wins over this YAML default from then on.
+        cv.Optional(CONF_MY_PATTERN, default="auto"): cv.one_of("auto", "simple", "extended", lower=True),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -103,3 +121,13 @@ async def to_code(config):
         cg.add(var.set_fixed_key(config[CONF_KEY]))
     if config[CONF_MOTOR_ADDRESS]:
         cg.add(var.set_motor_address(config[CONF_MOTOR_ADDRESS]))
+
+    my_pattern = config[CONF_MY_PATTERN]
+    if my_pattern == "auto":
+        my_pattern_extended = config[CONF_DEVICE_CLASS] == "blind"
+    else:
+        my_pattern_extended = my_pattern == "extended"
+    # Seeds the NVS-persisted live value on first-ever boot only - once the
+    # My Pattern switch (components/iohc/switch/) is toggled from HA, that
+    # persisted value wins over this YAML default from then on.
+    cg.add(var.set_my_pattern_default_extended(my_pattern_extended))

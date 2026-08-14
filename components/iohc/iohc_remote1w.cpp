@@ -353,18 +353,15 @@ namespace IOHC {
             case RemoteButton::Open:
             case RemoteButton::Close:
             case RemoteButton::Stop:
-            case RemoteButton::Position:
-            case RemoteButton::Vent: {
-                // 0x00: Open/Close/Stop/Position/Vent all share this cmd byte -
+            case RemoteButton::Position: {
+                // 0x00: Open/Close/Stop/Position all share this cmd byte -
                 // the button identity is encoded in the "main" payload byte,
                 // confirmed empirically against a real Situo remote: Open
-                // main=0x00, Close main=0xc8, Stop main=0xd2. Vent (main=0xd8)
-                // is what real TaHoma actually sends for "My" - confirmed via
-                // a live capture of a real TaHoma "My" press, and matches
-                // upstream's own RemoteButton::Vent case exactly. Stop
-                // (0xd2) only has an effect while the motor is actively
-                // moving; it is not the same command as "go to my/favorite
-                // position from idle".
+                // main=0x00, Close main=0xc8, Stop main=0xd2. Stop (0xd2)
+                // only has an effect while the motor is actively moving; it
+                // is not the same command as "go to my/favorite position
+                // from idle" - see RemoteButton::Vent's own case below for
+                // that, which needs different (16-byte) framing entirely.
                 auto *packet = new iohcPacket;
                 forge_packet(packet);
                 packet->payload.packet.header.cmd = 0x00;
@@ -398,19 +395,6 @@ namespace IOHC {
                         packet->payload.packet.msg.p0x00_14.main[1] = 0x00;
                         position_tracker_.stop();
                         companion_fp1 = 0x02;
-                        break;
-                    case RemoteButton::Vent:
-                        packet->payload.packet.msg.p0x00_14.main[0] = 0xd8;
-                        // main[1]=0x00, NOT upstream's 0x03: a real captured
-                        // TaHoma "My" frame (DATA 01 e7 d8 00 00 00) has
-                        // main[1]=0x00, confirmed across two independent
-                        // captures.
-                        packet->payload.packet.msg.p0x00_14.main[1] = 0x00;
-                        position_tracker_.stop();
-                        // No real captured companion-frame sample for Vent
-                        // (unlike Open/Close/Stop) - leaving companion_fp1 at
-                        // -1 (no companion sent) until/unless a real capture
-                        // says otherwise.
                         break;
                     case RemoteButton::Position: {
                         int p = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
@@ -488,6 +472,365 @@ namespace IOHC {
 
                 ESP_LOGI(TAG, "Command sent to %02X%02X%02X, position now %.0f%%", node_[0], node_[1], node_[2],
                          position_tracker_.getPosition());
+                break;
+            }
+
+            case RemoteButton::Vent: {
+                // Real My/favorite-position command - see this button's own
+                // comment in iohc_remote1w.h for the full dual-pattern
+                // picture (GitHub issue #1 and its follow-up regression).
+                if (!my_pattern_extended_) {
+                    // Simple pattern: single 14-byte p0x00_14 frame,
+                    // main=0xd8, no companion frame - what this bridge
+                    // originally sent, matches two independent real
+                    // reference implementations (laberning/home_io_control,
+                    // nicolas5000/io-rts-esp32) byte-for-byte, and is what
+                    // a plain roller shutter (no tilt) needs.
+                    auto *packet = new iohcPacket;
+                    forge_packet(packet);
+                    packet->payload.packet.header.cmd = 0x00;
+                    packet->payload.packet.header.CtrlByte1.asStruct.MsgLen += sizeof(_p0x00_14);
+
+                    packet->payload.packet.msg.p0x00_14.origin = 0x01; // 0x01 = User
+                    setAcei(packet->payload.packet.msg.p0x00_14.acei, 0x43);
+                    packet->payload.packet.msg.p0x00_14.main[0] = 0xd8;
+                    packet->payload.packet.msg.p0x00_14.main[1] = 0x00;
+                    packet->payload.packet.msg.p0x00_14.sequence[0] = sequence_ >> 8;
+                    packet->payload.packet.msg.p0x00_14.sequence[1] = sequence_ & 0x00ff;
+                    bump_and_persist_sequence();
+                    position_tracker_.stop();
+
+                    uint8_t hmac[16];
+                    std::vector<uint8_t> frame(&packet->payload.packet.header.cmd,
+                                                &packet->payload.packet.header.cmd + 7);
+                    iohcCrypto::create_1W_hmac(hmac, packet->payload.packet.msg.p0x00_14.sequence, key_, frame);
+                    for (uint8_t i = 0; i < 6; i++) packet->payload.packet.msg.p0x00_14.hmac[i] = hmac[i];
+
+                    packet->buffer_length = packet->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
+
+                    std::vector<iohcPacket *> packets2send{packet};
+                    radio_->retune(CHANNEL2);
+                    radio_->send(packets2send);
+
+                    ESP_LOGI(TAG, "Command sent to %02X%02X%02X, position now %.0f%%", node_[0], node_[1], node_[2],
+                             position_tracker_.getPosition());
+                    break;
+                }
+
+                // Extended pattern: confirmed byte-for-byte against two
+                // independent real Situo captures (a tilt-capable blind,
+                // and a plain shutter on this install) - identical frame
+                // shapes both times bar the expected sequence/HMAC change.
+                // _p0x00_16/_p0x20_16 (iohcPacket.h) already existed in
+                // this codebase, unused, and every byte matched their
+                // existing field names exactly once mapped - no new
+                // structs needed.
+                auto *packet = new iohcPacket;
+                forge_packet(packet);
+                // Pootch's original real quick-press capture (GitHub issue
+                // #1, 2026-08-08) shows the trigger sent 4 times total (1 +
+                // 3 retries), not forge_packet()'s default 5 (1 + 4) -
+                // packets2send[0]'s own repeat/repeatTime governs the
+                // ENTIRE batch's cadence, same as SetMy above.
+                packet->repeat = 3;
+                packet->payload.packet.header.cmd = 0x00;
+                packet->payload.packet.header.CtrlByte1.asStruct.MsgLen += sizeof(_p0x00_16);
+
+                packet->payload.packet.msg.p0x00_16.origin = 0x01;
+                setAcei(packet->payload.packet.msg.p0x00_16.acei, 0x43);
+                packet->payload.packet.msg.p0x00_16.main[0] = 0xd2;
+                packet->payload.packet.msg.p0x00_16.main[1] = 0x00;
+                packet->payload.packet.msg.p0x00_16.fp1 = 0x20;
+                packet->payload.packet.msg.p0x00_16.fp2 = 0xd2;
+                packet->payload.packet.msg.p0x00_16.data[0] = 0x00;
+                packet->payload.packet.msg.p0x00_16.data[1] = 0x00;
+                packet->payload.packet.msg.p0x00_16.sequence[0] = sequence_ >> 8;
+                packet->payload.packet.msg.p0x00_16.sequence[1] = sequence_ & 0x00ff;
+                bump_and_persist_sequence();
+                position_tracker_.stop();
+
+                uint8_t hmac[16];
+                std::vector<uint8_t> frame(&packet->payload.packet.header.cmd, &packet->payload.packet.header.cmd + 9);
+                iohcCrypto::create_1W_hmac(hmac, packet->payload.packet.msg.p0x00_16.sequence, key_, frame);
+                for (uint8_t i = 0; i < 6; i++) packet->payload.packet.msg.p0x00_16.hmac[i] = hmac[i];
+
+                packet->buffer_length = packet->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
+
+                std::vector<iohcPacket *> packets2send{packet};
+
+                // fp2/step follow the same _p0x20_16 shape as the ordinary
+                // companion-frame code above (origin=0x02, acei=0xff,
+                // main=[0x01,0x43]) - fp2=0x0c/step=0x00 is the start
+                // marker, fp2=0x05/step=0xff is the release sentinel. A real
+                // quick press goes straight from start marker to release
+                // with nothing in between - a sustained hold (SetMy below)
+                // instead runs a stepping burst of fp2=0x05 frames counting
+                // up between these two. repeat_count defaults to 3 (4 total
+                // sends) matching the start marker's own count in Pootch's
+                // real capture; the release call below overrides it to 1 (2
+                // total sends) to match that capture's own release count
+                // instead.
+                auto send_p0x20_16 = [&](uint8_t fp2, uint8_t step, uint8_t repeat_count = 3) {
+                    auto *pw = new iohcPacket;
+                    forge_packet(pw);
+                    pw->repeat = repeat_count;
+                    pw->payload.packet.header.cmd = 0x20;
+                    pw->payload.packet.header.CtrlByte1.asStruct.MsgLen += sizeof(_p0x20_16);
+
+                    pw->payload.packet.msg.p0x20_16.origin = 0x02;
+                    setAcei(pw->payload.packet.msg.p0x20_16.acei, 0xff);
+                    pw->payload.packet.msg.p0x20_16.main[0] = 0x01;
+                    pw->payload.packet.msg.p0x20_16.main[1] = 0x43;
+                    pw->payload.packet.msg.p0x20_16.fp1 = 0x02;
+                    pw->payload.packet.msg.p0x20_16.fp2 = fp2;
+                    pw->payload.packet.msg.p0x20_16.data[0] = step;
+                    pw->payload.packet.msg.p0x20_16.data[1] = 0x00;
+                    pw->payload.packet.msg.p0x20_16.sequence[0] = sequence_ >> 8;
+                    pw->payload.packet.msg.p0x20_16.sequence[1] = sequence_ & 0x00ff;
+                    bump_and_persist_sequence();
+
+                    uint8_t pw_hmac[16];
+                    std::vector<uint8_t> pw_frame(&pw->payload.packet.header.cmd, &pw->payload.packet.header.cmd + 9);
+                    iohcCrypto::create_1W_hmac(pw_hmac, pw->payload.packet.msg.p0x20_16.sequence, key_, pw_frame);
+                    for (uint8_t i = 0; i < 6; i++) pw->payload.packet.msg.p0x20_16.hmac[i] = pw_hmac[i];
+
+                    pw->buffer_length = pw->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
+                    packets2send.push_back(pw);
+                };
+
+                send_p0x20_16(0x0c, 0x00);
+                send_p0x20_16(0x05, 0xff, 1);
+
+                radio_->retune(CHANNEL2);
+                radio_->send(packets2send);
+
+                ESP_LOGI(TAG, "Command sent to %02X%02X%02X, position now %.0f%%", node_[0], node_[1], node_[2],
+                         position_tracker_.getPosition());
+                break;
+            }
+
+            case RemoteButton::SetMy: {
+                // Reprograms the motor's stored My/favorite position to
+                // wherever the shutter is currently physically sitting -
+                // see this button's own comment in iohc_remote1w.h for the
+                // full picture (naming, Somfy's own terminology, why no
+                // position is transmitted, and the dual-pattern rationale).
+                if (!my_pattern_extended_) {
+                    // Simple pattern: confirmed byte-for-byte against a
+                    // real Situo capture (Office Shutter, remote 75B4CB,
+                    // 2026-08-14 - passively overheard via this bridge's
+                    // own upstream decoder while physically reprogramming
+                    // My on the real remote), and confirmed end-to-end on
+                    // real hardware the same day (reprogram, then
+                    // re-recall of the newly stored position, both
+                    // correct). Two earlier attempts here
+                    // both guessed wrong: 20 independently-forged frames,
+                    // then a single frame retransmitted unchanged via
+                    // repeat/repeatTime - both assumed an RTS-style "hold =
+                    // identical frame repeated at the RF layer" and both
+                    // left Set My indistinguishable from an ordinary My
+                    // press. A third attempt correctly identified the real
+                    // mechanism (a companion CMD 0x20 burst carrying an
+                    // incrementing step counter, 0x02 through 0x16, between
+                    // a start marker and a release - see the extended
+                    // pattern's own Vent/SetMy cases above, whose
+                    // send_p0x20_16 lambda this reuses unchanged) but paired
+                    // it with the wrong trigger (main=0xd8, this pattern's
+                    // own Vent/My value) - real hardware showed that
+                    // combination reprograms nothing and actively clears
+                    // the motor's existing stored My position instead. The
+                    // real capture shows the trigger for a held press is
+                    // main=0xd2 - the SAME value as Stop - not 0xd8; a
+                    // quick My press in the same capture uses main=0xd2
+                    // too, with an empty companion burst (start
+                    // immediately followed by release, no steps), matching
+                    // Somfy's own documented Stop-button-doubles-as-My
+                    // behavior when pressed while idle. Vent/My above is
+                    // deliberately left on main=0xd8 - independently
+                    // confirmed working on real hardware already, and nothing
+                    // here contradicts it still being a valid way to trigger
+                    // a recall.
+                    auto *packet = new iohcPacket;
+                    forge_packet(packet);
+                    // Real capture shows each frame sent 4 times total (1 +
+                    // 3 retries), not forge_packet()'s default 5 (1 + 4) -
+                    // and packets2send[0]'s own repeat/repeatTime governs
+                    // the ENTIRE batch's cadence (confirmed against
+                    // iohcRadio.cpp - see the extended pattern's own
+                    // trigger below for the same override), so it must be
+                    // set here, on the trigger, not just on the companion
+                    // frames.
+                    packet->repeat = 3;
+                    packet->repeatTime = 55; // ~220ms/step (4 sends * 55ms), matching the real capture's average
+                    // Confirmed end-to-end on real hardware after this fix
+                    // (2026-08-14, Office Shutter and Bedroom Middle
+                    // Shutter): reprogram, then correct re-recall of the
+                    // newly stored position, matching the physical Situo's
+                    // own stored value on both.
+                    packet->payload.packet.header.cmd = 0x00;
+                    packet->payload.packet.header.CtrlByte1.asStruct.MsgLen += sizeof(_p0x00_14);
+
+                    packet->payload.packet.msg.p0x00_14.origin = 0x01; // 0x01 = User
+                    setAcei(packet->payload.packet.msg.p0x00_14.acei, 0x43);
+                    packet->payload.packet.msg.p0x00_14.main[0] = 0xd2;
+                    packet->payload.packet.msg.p0x00_14.main[1] = 0x00;
+                    packet->payload.packet.msg.p0x00_14.sequence[0] = sequence_ >> 8;
+                    packet->payload.packet.msg.p0x00_14.sequence[1] = sequence_ & 0x00ff;
+                    bump_and_persist_sequence();
+
+                    uint8_t hmac[16];
+                    std::vector<uint8_t> frame(&packet->payload.packet.header.cmd,
+                                                &packet->payload.packet.header.cmd + 7);
+                    iohcCrypto::create_1W_hmac(hmac, packet->payload.packet.msg.p0x00_14.sequence, key_, frame);
+                    for (uint8_t i = 0; i < 6; i++) packet->payload.packet.msg.p0x00_14.hmac[i] = hmac[i];
+
+                    packet->buffer_length = packet->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
+
+                    std::vector<iohcPacket *> packets2send{packet};
+
+                    // Same companion-frame shape as the extended pattern's
+                    // own send_p0x20_16 lambda above (origin=0x02,
+                    // acei=0xff, main=[0x01,0x43], fp1=0x02) - fp2=0x0c is
+                    // the start marker, fp2=0x05 the stepping/release
+                    // frames, data carries the step counter (0xff=release).
+                    auto send_p0x20_16 = [&](uint8_t fp2, uint8_t step) {
+                        auto *pw = new iohcPacket;
+                        forge_packet(pw);
+                        pw->repeat = 3; // matches real capture's 4 total sends per step - see trigger's own comment
+                        pw->payload.packet.header.cmd = 0x20;
+                        pw->payload.packet.header.CtrlByte1.asStruct.MsgLen += sizeof(_p0x20_16);
+
+                        pw->payload.packet.msg.p0x20_16.origin = 0x02;
+                        setAcei(pw->payload.packet.msg.p0x20_16.acei, 0xff);
+                        pw->payload.packet.msg.p0x20_16.main[0] = 0x01;
+                        pw->payload.packet.msg.p0x20_16.main[1] = 0x43;
+                        pw->payload.packet.msg.p0x20_16.fp1 = 0x02;
+                        pw->payload.packet.msg.p0x20_16.fp2 = fp2;
+                        pw->payload.packet.msg.p0x20_16.data[0] = step;
+                        pw->payload.packet.msg.p0x20_16.data[1] = 0x00;
+                        pw->payload.packet.msg.p0x20_16.sequence[0] = sequence_ >> 8;
+                        pw->payload.packet.msg.p0x20_16.sequence[1] = sequence_ & 0x00ff;
+                        bump_and_persist_sequence();
+
+                        uint8_t pw_hmac[16];
+                        std::vector<uint8_t> pw_frame(&pw->payload.packet.header.cmd,
+                                                       &pw->payload.packet.header.cmd + 9);
+                        iohcCrypto::create_1W_hmac(pw_hmac, pw->payload.packet.msg.p0x20_16.sequence, key_, pw_frame);
+                        for (uint8_t i = 0; i < 6; i++) pw->payload.packet.msg.p0x20_16.hmac[i] = pw_hmac[i];
+
+                        pw->buffer_length = pw->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
+                        packets2send.push_back(pw);
+                    };
+
+                    send_p0x20_16(0x0c, 0x00);
+                    for (uint8_t step = 0x02; step <= 0x16; step++) send_p0x20_16(0x05, step);
+                    send_p0x20_16(0x05, 0xff);
+
+                    radio_->retune(CHANNEL2);
+                    radio_->send(packets2send);
+
+                    ESP_LOGI(TAG,
+                             "Set My sent to %02X%02X%02X (real captured pattern, reprogrammed to current physical "
+                             "position)",
+                             node_[0], node_[1], node_[2]);
+                    break;
+                }
+
+                // Extended pattern: same trigger + start-marker frames as
+                // Vent above, but instead of the immediate release, holds
+                // with a sustained CMD 0x20 stepping burst - steps 0x02
+                // through 0x16 (21 steps, matching a real
+                // confirmed-successful reprogram capture's ~5.25s duration
+                // exactly, GitHub issue #1) - before the release sentinel.
+                // No cover position/state side effects - transmit-only,
+                // same as Vent.
+                auto *packet = new iohcPacket;
+                forge_packet(packet);
+                // Pootch's original real capture (GitHub issue #1,
+                // 2026-08-09) shows the trigger and start-marker frames
+                // each sent 4 times total (1 + 3 retries), same as the
+                // simple pattern's own real captures - but the stepping
+                // frames (0x02-0x16) and release are sent only 2 times
+                // total (1 + 1 retry) each, NOT 4. Verified directly
+                // against the raw capture, not assumed from the simple
+                // pattern's own numbers - the two patterns come from two
+                // different real remotes and are not guaranteed to share
+                // identical retry counts, and here they don't. See
+                // send_p0x20_16's own repeat_count parameter below for the
+                // stepping/release side of this. packets2send[0]'s own
+                // repeat/repeatTime governs the ENTIRE batch's cadence
+                // (confirmed against iohcRadio.cpp's onTxTicker()/
+                // startQueuedSend(): the tick interval is set once, from
+                // the first packet, and never re-armed per packet).
+                packet->repeat = 3;
+                packet->repeatTime = 55; // ~220ms/step, matching the real capture's average
+                packet->payload.packet.header.cmd = 0x00;
+                packet->payload.packet.header.CtrlByte1.asStruct.MsgLen += sizeof(_p0x00_16);
+
+                packet->payload.packet.msg.p0x00_16.origin = 0x01;
+                setAcei(packet->payload.packet.msg.p0x00_16.acei, 0x43);
+                packet->payload.packet.msg.p0x00_16.main[0] = 0xd2;
+                packet->payload.packet.msg.p0x00_16.main[1] = 0x00;
+                packet->payload.packet.msg.p0x00_16.fp1 = 0x20;
+                packet->payload.packet.msg.p0x00_16.fp2 = 0xd2;
+                packet->payload.packet.msg.p0x00_16.data[0] = 0x00;
+                packet->payload.packet.msg.p0x00_16.data[1] = 0x00;
+                packet->payload.packet.msg.p0x00_16.sequence[0] = sequence_ >> 8;
+                packet->payload.packet.msg.p0x00_16.sequence[1] = sequence_ & 0x00ff;
+                bump_and_persist_sequence();
+
+                uint8_t hmac[16];
+                std::vector<uint8_t> frame(&packet->payload.packet.header.cmd, &packet->payload.packet.header.cmd + 9);
+                iohcCrypto::create_1W_hmac(hmac, packet->payload.packet.msg.p0x00_16.sequence, key_, frame);
+                for (uint8_t i = 0; i < 6; i++) packet->payload.packet.msg.p0x00_16.hmac[i] = hmac[i];
+
+                packet->buffer_length = packet->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
+
+                std::vector<iohcPacket *> packets2send{packet};
+
+                // repeat_count defaults to 1 (2 total sends) matching
+                // Pootch's real capture for the stepping/release frames;
+                // the start-marker call below overrides it to 3 (4 total
+                // sends) to match that capture's own trigger/start-marker
+                // count instead - see the trigger's own comment above for
+                // the full picture.
+                auto send_p0x20_16 = [&](uint8_t fp2, uint8_t step, uint8_t repeat_count = 1) {
+                    auto *pw = new iohcPacket;
+                    forge_packet(pw);
+                    pw->repeat = repeat_count;
+                    pw->payload.packet.header.cmd = 0x20;
+                    pw->payload.packet.header.CtrlByte1.asStruct.MsgLen += sizeof(_p0x20_16);
+
+                    pw->payload.packet.msg.p0x20_16.origin = 0x02;
+                    setAcei(pw->payload.packet.msg.p0x20_16.acei, 0xff);
+                    pw->payload.packet.msg.p0x20_16.main[0] = 0x01;
+                    pw->payload.packet.msg.p0x20_16.main[1] = 0x43;
+                    pw->payload.packet.msg.p0x20_16.fp1 = 0x02;
+                    pw->payload.packet.msg.p0x20_16.fp2 = fp2;
+                    pw->payload.packet.msg.p0x20_16.data[0] = step;
+                    pw->payload.packet.msg.p0x20_16.data[1] = 0x00;
+                    pw->payload.packet.msg.p0x20_16.sequence[0] = sequence_ >> 8;
+                    pw->payload.packet.msg.p0x20_16.sequence[1] = sequence_ & 0x00ff;
+                    bump_and_persist_sequence();
+
+                    uint8_t pw_hmac[16];
+                    std::vector<uint8_t> pw_frame(&pw->payload.packet.header.cmd, &pw->payload.packet.header.cmd + 9);
+                    iohcCrypto::create_1W_hmac(pw_hmac, pw->payload.packet.msg.p0x20_16.sequence, key_, pw_frame);
+                    for (uint8_t i = 0; i < 6; i++) pw->payload.packet.msg.p0x20_16.hmac[i] = pw_hmac[i];
+
+                    pw->buffer_length = pw->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
+                    packets2send.push_back(pw);
+                };
+
+                send_p0x20_16(0x0c, 0x00, 3);
+                for (uint8_t step = 0x02; step <= 0x16; step++) send_p0x20_16(0x05, step);
+                send_p0x20_16(0x05, 0xff);
+
+                radio_->retune(CHANNEL2);
+                radio_->send(packets2send);
+
+                ESP_LOGI(TAG, "Set My sent to %02X%02X%02X (reprogrammed to current physical position)", node_[0],
+                         node_[1], node_[2]);
                 break;
             }
         }

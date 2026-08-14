@@ -49,12 +49,26 @@ namespace IOHC {
         Close,
         Stop,
         Position,
-        // "My"/favorite position while idle - NOT the same as Stop. Confirmed
-        // via a real TaHoma "My" capture: TaHoma sends main=0xd8 (this is
-        // upstream's own RemoteButton::Vent case, main[1]=0x03), never
-        // main=0xd2 (Stop). Stop only has an effect while actually moving -
-        // sending it while idle is a no-op on the motor side, which is why
-        // "My" previously did nothing when the cover was already stationary.
+        // "My"/favorite position while idle - NOT the same as Stop. Two
+        // confirmed real-hardware patterns exist, selected per-cover via
+        // my_pattern_extended_ below (see IOHCRemote1W::set_my_pattern_extended()):
+        // - simple (main=0xd8, single 14-byte p0x00_14 frame, no companion):
+        //   what this bridge originally sent, matches two independent real
+        //   reference implementations (laberning/home_io_control,
+        //   nicolas5000/io-rts-esp32) byte-for-byte, and is what a plain
+        //   roller shutter (no tilt) needs.
+        // - extended (16-byte main=0xD200 trigger + CMD 0x20 companion burst,
+        //   _p0x00_16/_p0x20_16): captured from a real physical Situo against
+        //   a tilt-capable blind (GitHub issue #1) - reproduces height AND
+        //   tilt, which the simple pattern alone does not.
+        // Both are real, confirmed-working captures for their respective
+        // device type - this is not a case of one being right and one being
+        // wrong. The simple pattern was confirmed NOT to work on plain
+        // shutters already 2W-bonded to a TaHoma/Connexoon box when sent as
+        // the extended pattern (root cause still not understood - see
+        // git-workflow.md/MEMORY.md for the v2026.08.1 rollback history) -
+        // exactly the case the default (device_class-based) resolution is
+        // meant to route back to the pattern it always worked with.
         Vent,
         // 0x1E: identify/locate. No physical remote has this button - only
         // seen via a real captured TaHoma/2W frame. Overkiz exposes it as 3
@@ -82,6 +96,55 @@ namespace IOHC {
         // is to "Program") rather than introducing new vocabulary at this
         // layer - see IOHCCover::press_prog2w() / IOHC::IOHCController2W::arm_bonding().
         Prog2W,
+        // "Set My" button's entry point (GitHub issue #1) - reprograms the
+        // motor's own stored My/favorite position (height, and tilt where
+        // applicable) to wherever the shutter is currently physically
+        // sitting. Somfy's own terminology: their consumer FAQ titles this
+        // "set the my favourite position"; their installer guides also use
+        // "programmed"/"record"/"modify" for the same action - "Set" was
+        // chosen as the closest match to their most prominent official
+        // wording. No "(1W)" suffix - unlike Program, which needs it to
+        // distinguish the real 1W pairing ceremony from the still-unbuilt
+        // 2W bonding counterpart, every other button here (including this
+        // one) is 1W-only right now, so the suffix would be redundant. No
+        // position argument is sent - matches protocol reality (the motor
+        // samples its own current physical state, nothing is transmitted) -
+        // so the desired position must already be commanded via the normal
+        // controls before pressing this. Transmit-only, no cover state side
+        // effects. Two patterns, same my_pattern_extended_ toggle as Vent:
+        // - extended: same trigger + start-marker frames as Vent, then a
+        //   sustained CMD 0x20 stepping burst matching a real
+        //   confirmed-successful reprogram capture exactly (steps 0x02-0x16)
+        //   before the release - matches a tilt-capable blind's own real
+        //   captured reprogram (GitHub issue #1).
+        // - simple: same start-marker/stepping/release companion burst as
+        //   extended above (steps 0x02-0x16), but the trigger is main=0xd2
+        //   - the same value as Stop - not main=0xd8 (Vent/My's own value).
+        //   Confirmed byte-for-byte against a real Situo capture (Office
+        //   Shutter, remote 75B4CB, 2026-08-14 - passively overheard while
+        //   physically reprogramming My on the real remote). Two earlier
+        //   guesses at the trigger/hold mechanism itself (repeating
+        //   independently-forged frames; retransmitting one unchanged
+        //   frame via repeat/repeatTime) failed to reprogram anything, and
+        //   a third (this companion burst paired with main=0xd8 instead of
+        //   0xd2) actively cleared the motor's existing stored My position
+        //   - real hardware showed that combination is actively harmful,
+        //   not just ineffective, before this real capture settled the
+        //   trigger value.
+        //
+        // Both patterns share one more real-capture-derived detail: every
+        // frame is sent 4 times total (repeat=3), not forge_packet()'s
+        // default 5 (repeat=4) - confirmed against real captures'
+        // own observed transmission count. With the wrong count (5), Set
+        // My silently failed on some real, already-paired, battery-powered
+        // shutters (Bedroom Middle Shutter) while working on others (Office
+        // Shutter) using the exact same trigger/burst content - the
+        // over-the-air transmission pattern itself mattered, not just the
+        // decoded field values. Fixed 2026-08-14; confirmed end-to-end
+        // (reprogram, then correct re-recall of the newly stored position,
+        // matching the physical Situo's own stored value) on both Office
+        // Shutter and Bedroom Middle Shutter afterward.
+        SetMy,
     };
 
     // One virtual remote identity, bonded 1:1 with one physical motor.
@@ -110,6 +173,12 @@ namespace IOHC {
         void set_travel_time_close(uint32_t seconds) { position_tracker_.setTravelTimeClose(seconds); }
         void set_type(uint8_t type) { type_ = type; }
         void set_manufacturer(uint8_t manufacturer) { manufacturer_ = manufacturer; }
+        // Selects which real-hardware-confirmed My/Set My wire pattern this
+        // motor needs - see RemoteButton::Vent/SetMy's own comments above
+        // for what each does and why both are real. Resolved by the cover
+        // config layer (device_class, or an explicit override) before this
+        // is ever called - see cover/__init__.py's my_pattern option.
+        void set_my_pattern_extended(bool extended) { my_pattern_extended_ = extended; }
 
         bool is_paired() const { return paired_; }
         BlindPosition &position_tracker() { return position_tracker_; }
@@ -133,6 +202,11 @@ namespace IOHC {
         uint8_t type_{0};
         uint8_t manufacturer_{2}; // 2 = Somfy, matches upstream's own default
         bool paired_{false};
+        // true (extended) is only a fallback if set_my_pattern_extended() is
+        // never called - the cover config layer always resolves and sets an
+        // explicit value (see set_my_pattern_extended() above), so this
+        // default should never actually matter in practice.
+        bool my_pattern_extended_{true};
 
         BlindPosition position_tracker_{};
     };

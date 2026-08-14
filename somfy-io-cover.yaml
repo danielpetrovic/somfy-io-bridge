@@ -14,6 +14,11 @@
 # for this cover).
 # `${cover_id}_device` must exist in the main file's `esphome.devices` list,
 # this is what makes each cover show up as its own HA device.
+# `my_pattern` selects the My/Set My wire pattern this motor needs - see
+# cover/__init__.py's own comment for the full picture. Leave as "auto" to
+# resolve from `device_class` above (blind -> extended, everything else ->
+# simple); override to "simple"/"extended" only if a specific motor needs
+# the other pattern despite its device_class.
 substitutions:
   cover_id: "changeme"
   cover_name: "Change Me"
@@ -22,6 +27,7 @@ substitutions:
   key: ""
   broadcast_type: "0"
   motor_address: ""
+  my_pattern: "auto"
 
 cover:
   - platform: iohc
@@ -39,6 +45,7 @@ cover:
     key: ${key}
     broadcast_type: ${broadcast_type}
     motor_address: ${motor_address}
+    my_pattern: ${my_pattern}
 
 button:
   # Single button, matching the physical remote's own labeling (PROG) and
@@ -121,6 +128,19 @@ button:
     cover_id: ${cover_id}
     type: stop_identify
     entity_category: diagnostic
+  # Reprograms the motor's own stored My/favorite position (height, and
+  # tilt where applicable) to wherever the shutter is currently physically
+  # sitting - move it to the desired spot with the normal controls first,
+  # then press this (GitHub issue #1). No "(1W)" suffix: every button here
+  # is 1W-only right now, unlike Program above which needs the suffix to
+  # distinguish it from its still-unbuilt 2W counterpart.
+  - platform: iohc
+    id: ${cover_id}_set_my
+    name: "Set My"
+    device_id: ${cover_id}_device
+    cover_id: ${cover_id}
+    type: set_my
+    entity_category: config
 
 select:
   - platform: iohc
@@ -128,3 +148,19 @@ select:
     name: "Mode"
     device_id: ${cover_id}_device
     cover_id: ${cover_id}
+
+# On = this cover has tilt/lamella and needs the extended My/Set My pattern
+# to reproduce it (GitHub issue #1). Off = plain shutter/shade, simple
+# pattern (matches two independent real reference implementations). Starts
+# from device_class via the my_pattern substitution above (default "auto":
+# blind -> on, everything else -> off) - once toggled here, the choice
+# persists in NVS and device_class no longer overrides it. See
+# components/iohc/switch/__init__.py.
+switch:
+  - platform: iohc
+    id: ${cover_id}_my_pattern
+    name: "Tilt Support"
+    icon: mdi:blinds-horizontal
+    device_id: ${cover_id}_device
+    cover_id: ${cover_id}
+    entity_category: config

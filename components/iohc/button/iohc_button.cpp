@@ -15,6 +15,7 @@ void IOHCPairButton::press_action() {
                       : type_ == IOHC::RemoteButton::Identify      ? "Identify"
                       : type_ == IOHC::RemoteButton::StartIdentify ? "Start Identify"
                       : type_ == IOHC::RemoteButton::StopIdentify  ? "Stop Identify"
+                      : type_ == IOHC::RemoteButton::SetMy         ? "Set My"
                                                                     : "Prog (2W)";
   ESP_LOGI(TAG, "%s pressed - transmitting %s", this->get_name().c_str(), name);
   // My and Prog2W both need cover-level handling, unlike every other button

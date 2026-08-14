@@ -36,6 +36,19 @@ class IOHCCover : public cover::Cover, public Component {
   void set_parent(IOHCComponent *parent) { parent_ = parent; }
   void set_type(uint8_t type) { type_ = type; }
   void set_manufacturer(uint8_t manufacturer) { manufacturer_ = manufacturer; }
+  // Compile-time seed only - resolved (auto/simple/extended -> plain bool)
+  // by cover/__init__.py's my_pattern option, called by codegen before
+  // setup()/cover_prefs_ exist. Only used as the NVS fallback on
+  // first-ever boot - see setup() and set_my_pattern_extended() below for
+  // the actual live value the remote uses.
+  void set_my_pattern_default_extended(bool extended) { my_pattern_default_extended_ = extended; }
+
+  bool get_my_pattern_extended() const { return my_pattern_extended_; }
+  // My Pattern switch's write_state() entry point - persists to NVS and
+  // immediately forwards the new value to remote_, mirrors set_mode()'s
+  // own pattern exactly. See IOHC::RemoteButton::Vent/SetMy in
+  // iohc_remote1w.h for what this actually controls.
+  void set_my_pattern_extended(bool extended);
   // Optional (6/32 hex chars). If both set, the bonded identity comes from
   // YAML/secrets.yaml instead of being randomly generated into this board's
   // own flash - see IOHC::IOHCRemote1W::begin() for why.
@@ -96,6 +109,8 @@ class IOHCCover : public cover::Cover, public Component {
   static constexpr uint32_t TRAVEL_TIME_CLOSE = 25;
   uint8_t type_{0};
   uint8_t manufacturer_{2};
+  bool my_pattern_default_extended_{true};
+  bool my_pattern_extended_{true};
   std::string fixed_node_hex_;
   std::string fixed_key_hex_;
   std::string nvs_key_;

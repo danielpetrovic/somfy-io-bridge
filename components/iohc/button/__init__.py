@@ -40,6 +40,9 @@ TYPES = {
     # This bridge's own 2W bonding (Phase 3, arms IOHC::IOHCController2W) -
     # NOT a 1W wire command, see the RemoteButton::Prog2W enum comment.
     "prog2w": RemoteButton.Prog2W,
+    # Reprograms the motor's own stored My position - see the
+    # RemoteButton::SetMy enum comment for the full picture.
+    "set_my": RemoteButton.SetMy,
 }
 
 CONFIG_SCHEMA = button.button_schema(IOHCPairButton).extend(
