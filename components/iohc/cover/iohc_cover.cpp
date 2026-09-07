@@ -111,10 +111,11 @@ void IOHCCover::loop() {
   // estimate would keep running to 0%/100% regardless of what was actually
   // requested, even though the real motor stops correctly on its own.
   if (tracker.isMoving() && target_position_ >= 0.0f) {
-    bool reached_opening =
-        this->current_operation == cover::COVER_OPERATION_OPENING && tracker.getPosition() >= target_position_;
-    bool reached_closing =
-        this->current_operation == cover::COVER_OPERATION_CLOSING && tracker.getPosition() <= target_position_;
+    // target_raw_opening_ reflects the tracker's own real direction, not
+    // current_operation (HA space) - see its own comment in iohc_cover.h
+    // for why the two can disagree when Invert Direction is on.
+    bool reached_opening = target_raw_opening_ && tracker.getPosition() >= target_position_;
+    bool reached_closing = !target_raw_opening_ && tracker.getPosition() <= target_position_;
     if (reached_opening || reached_closing) {
       tracker.setPosition(target_position_);
       tracker.stop();
@@ -151,7 +152,7 @@ void IOHCCover::dump_config() {
       mode_ == Mode::POSITION ? "Position" : mode_ == Mode::MY ? "Open / My / Close" : "Two-Way (Experimental)";
   ESP_LOGCONFIG(TAG, "  Mode: %s", mode_name);
   ESP_LOGCONFIG(TAG, "  Invert Direction: %s", invert_ ? "yes" : "no");
-  ESP_LOGCONFIG(TAG, "  Travel time open/close: %us / %us (fixed)", TRAVEL_TIME_OPEN, TRAVEL_TIME_CLOSE);
+  ESP_LOGCONFIG(TAG, "  Travel time open/close: %lus / %lus (fixed)", TRAVEL_TIME_OPEN, TRAVEL_TIME_CLOSE);
 }
 
 cover::CoverTraits IOHCCover::get_traits() {
@@ -278,19 +279,21 @@ void IOHCCover::control(const cover::CoverCall &call) {
     return;
   }
 
-  // Mode::POSITION. target_position_ is deliberately kept in raw/motor
-  // space throughout (matching tracker.getPosition(), which follows
-  // whichever RemoteButton actually gets sent) - loop()'s reached-target
-  // check compares the two directly and needs no invert-awareness of its
-  // own as a result. current_operation and the persisted "position" stay
-  // in HA space (percent, unconverted) since both are user-facing.
+  // Mode::POSITION. target_position_ and target_raw_opening_ are
+  // deliberately kept in raw/motor space throughout (matching
+  // tracker.getPosition(), which follows whichever RemoteButton actually
+  // gets sent) - loop()'s reached-target check compares against those
+  // directly. current_operation and the persisted "position" stay in HA
+  // space (percent, unconverted) since both are user-facing.
   if (percent >= 100) {
     remote_.cmd(invert_ ? IOHC::RemoteButton::Close : IOHC::RemoteButton::Open);
     target_position_ = invert_ ? 0.0f : 100.0f;
+    target_raw_opening_ = !invert_;
     this->current_operation = cover::COVER_OPERATION_OPENING;
   } else if (percent <= 0) {
     remote_.cmd(invert_ ? IOHC::RemoteButton::Open : IOHC::RemoteButton::Close);
     target_position_ = invert_ ? 100.0f : 0.0f;
+    target_raw_opening_ = invert_;
     this->current_operation = cover::COVER_OPERATION_CLOSING;
   } else {
     float current_raw = remote_.position_tracker().getPosition();
@@ -298,6 +301,12 @@ void IOHCCover::control(const cover::CoverCall &call) {
     int raw_percent = invert_ ? (100 - percent) : percent;
     remote_.cmd(IOHC::RemoteButton::Position, raw_percent);
     target_position_ = static_cast<float>(raw_percent);
+    // Mirrors the same comparison iohc_remote1w.cpp's own Position case
+    // uses internally to decide startOpening()/startClosing() on the
+    // tracker (raw_percent vs the tracker's own pre-command raw
+    // position) - has to agree with that, not with current_operation's
+    // HA-space comparison below.
+    target_raw_opening_ = raw_percent > current_raw;
     this->current_operation =
         (percent > current_ha) ? cover::COVER_OPERATION_OPENING : cover::COVER_OPERATION_CLOSING;
   }

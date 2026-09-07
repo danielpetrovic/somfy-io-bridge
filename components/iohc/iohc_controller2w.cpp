@@ -143,7 +143,7 @@ namespace IOHC {
         send_discover();
         attempt_.last_discover_sent_ms = esphome::millis();
         ESP_LOGI(TAG, "2W bonding with %02X%02X%02X: sent DISCOVER (0x28) on CH2, waiting up to 60s (resending "
-                      "every %us) - RX coverage across CH1/CH2/CH3 is enabled for the duration of this attempt - "
+                      "every %lus) - RX coverage across CH1/CH2/CH3 is enabled for the duration of this attempt - "
                       "make sure the motor's pairing window is already open (hold PROG on an existing paired "
                       "remote first, same as before)",
                  motor_address[0], motor_address[1], motor_address[2], DISCOVER_RESEND_MS / 1000);

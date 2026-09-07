@@ -154,6 +154,15 @@ class IOHCCover : public cover::Cover, public Component {
   // -1 means "no target set" (Stop was called, or nothing requested yet).
   // Only meaningful in Mode::POSITION.
   float target_position_{-1.0f};
+  // Which direction the tracker itself is actually moving in raw/motor
+  // space - NOT the same as current_operation, which stays in HA space
+  // (see control()'s own comments). With Invert Direction on, pressing
+  // Open sends Close to the motor, so current_operation correctly says
+  // OPENING while the tracker is really counting down - loop()'s
+  // reached-target check needs to know the tracker's own real direction,
+  // not the HA-facing one, or it picks the wrong comparison and snaps
+  // straight to the raw target instead of animating.
+  bool target_raw_opening_{true};
 };
 
 }  // namespace iohc

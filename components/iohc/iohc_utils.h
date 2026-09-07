@@ -42,13 +42,17 @@ inline std::string bitrow_to_hex_string(const uint8_t* bitrow, unsigned bit_len)
     return ss.str();
     }
 
-//#define to_hex_str(uint8_val) \
-//    (static_cast<std::stringstream const&>(std::stringstream() << std::hex << std::setw(2) << std::setfill('0') << /*static_cast<int>*/(uint8_val))).str()
-//std::string to_hex_str(uint8_t value) {
-//    std::stringstream stream;
-//    stream << "0x" << std::uppercase << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(value);
-//    return stream.str();
-//}
+/* Superseded by the real to_hex_str #define above - kept as-is (vendored),
+   converted from //-per-line to a block comment since a // comment ending
+   in a line-continuation backslash trips -Wcomment.
+#define to_hex_str(uint8_val) \
+    (static_cast<std::stringstream const&>(std::stringstream() << std::hex << std::setw(2) << std::setfill('0') << (uint8_val))).str()
+std::string to_hex_str(uint8_t value) {
+    std::stringstream stream;
+    stream << "0x" << std::uppercase << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(value);
+    return stream.str();
+}
+*/
     // int bitrow_snprint(uint8_t const *bitrow, unsigned bit_len, char *str, unsigned size){
     //     if (bit_len == 0 && size > 0) str[0] = '\0';
     //     int len = 0;
