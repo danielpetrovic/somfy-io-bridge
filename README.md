@@ -211,6 +211,12 @@ Each cover has a `select:` entity to switch between:
 - **`Open / My / Close`** - three discrete states (0% closed / 50% "My" / 100% open), no time tracking, no arbitrary percentages - any position request strictly between 0 and 100 collapses to the real My/favorite-position command (see [My and Set My](#my-and-set-my) below). My and Stop are **not** the same command: the dedicated Stop action still sends `Stop` (`main=0xd2`), which only has an effect while the motor is actively moving.
 - **`Two-Way (Experimental)`** - real 2W commands to an actually-bonded motor. The control path (per-command challenge/response, position feedback) is implemented and validated against real captured frames. This bridge's own bonding has never yet succeeded against real hardware, though - see [2W bonding: current status and open problem](#2w-bonding-current-status-and-open-problem) below for the full picture. Selecting this mode on an unbonded motor just logs a warning and ignores commands.
 
+## Direction inversion
+
+Some installations have both motor axes wired or configured so this bridge's own Open/Close convention comes out physically backwards from Home Assistant's - an awning where `Open` retracts it and `Close` extends it, when HA's own convention is that an awning is open when extended. `device_class` doesn't affect this - it only changes labels/icons, not behavior.
+
+Each cover has an **Invert Direction** switch (config entity) for exactly this - on swaps which command actually gets sent for Open/Close, and mirrors the local position estimate and any real 2W position feedback back to Home Assistant's own convention, so the entity reports the same orientation it accepts. Starts from the `invert` YAML substitution (default `false`) on first-ever boot; once toggled from Home Assistant, the choice persists on the device and the YAML default no longer applies, same mechanism as [Tilt Support](#tilt-support-switch). `Stop` and `My`/`Set My` are unaffected either way - both are direction-agnostic commands.
+
 ## 2W bonding: current status and open problem
 
 This bridge's own 2W bonding (`Program (2W)` - becoming a real independent controller for a motor, rather than just overhearing an existing box's traffic) has never yet succeeded against real hardware, despite substantial engineering effort across many sessions. This section documents what's been built, what's been ruled out, and why the underlying obstacle is still unresolved.
@@ -252,13 +258,13 @@ All of the above confirmed working against real motors, including pairing/unpair
 ## Files
 
 - `somfy-io-bridge.yaml`: the device config (radio setup, Wi-Fi/API/OTA, OLED display, diagnostic entities (WiFi Signal, Uptime, Loop Time, Restart Reason, Restart), configuration entities (Display, Display Brightness, Display Page Interval), Debug Logging / Debug Channel Hop (2W) / Debug Passive Decode (2W) control switches, and one `packages:` entry per physical cover).
-- `somfy-io-cover.yaml`: reusable package template (cover + Program button + My button + Set My button + Identify/Start/Stop Identify buttons + Mode select + Tilt Support switch), instantiated per cover via substitution variables (`cover_id`, `cover_name`, `device_class`, `node`, `key`, `broadcast_type`, `motor_address` - required for Program (2W)/Two-Way mode, see [Pairing](#pairing-and-unpairing-a-cover-to-its-motor), `my_pattern` - see [Tilt Support switch](#tilt-support-switch)).
+- `somfy-io-cover.yaml`: reusable package template (cover + Program button + My button + Set My button + Identify/Start/Stop Identify buttons + Mode select + Tilt Support switch + Invert Direction switch), instantiated per cover via substitution variables (`cover_id`, `cover_name`, `device_class`, `node`, `key`, `broadcast_type`, `motor_address` - required for Program (2W)/Two-Way mode, see [Pairing](#pairing-and-unpairing-a-cover-to-its-motor), `my_pattern` - see [Tilt Support switch](#tilt-support-switch), `invert` - see [Direction inversion](#direction-inversion)).
 - `components/iohc/`: this repo's own `external_component` - fetched automatically via `external_components: type: git` in `somfy-io-bridge.yaml` (see Setup above), no manual copying needed.
   - Flat directory (no subdirectories except `cover/`, `button/`, `select/`, `switch/`) - matches both git-source's auto-detection (`components/` at the repo root) and, historically, the only structure ESPHome's local-component loader supports, if you ever switch back to `type: local` for local development - see the comment in `iohc.h` for why.
   - `iohcRadio.*`, `iohcPacket.*`, `SX1276Helpers.*`, `sx1276Regs-Fsk.h`, `TickerUsESP32.*`, `Delegate.h`: vendored radio/protocol layer, near-verbatim from upstream.
   - `iohc_remote1w.*`: the command/pairing layer (Add/Remove/Open/Close/Stop/Vent/SetMy/Position/Identify), rewritten around ESPHome's `Preferences`-backed persistence instead of upstream's JSON-file + MQTT model.
   - `iohc_blind_position.*`: the local travel-time position estimator, fixed 25s open/close, used only for the cosmetic "still moving" animation in `Position` mode (see [Modes](#modes)).
-  - `cover/`, `button/`, `select/`, `switch/`: the ESPHome platform integration. `button/` dispatches many entity types via its own `type:` field; `select/` and `switch/` each implement one entity type (Mode, Tilt Support).
+  - `cover/`, `button/`, `select/`, `switch/`: the ESPHome platform integration. `button/` and `switch/` each dispatch multiple entity types via their own `type:` field (switch: Tilt Support/Invert Direction); `select/` implements one entity type (Mode).
 
 ## OLED display
 

@@ -36,6 +36,7 @@ CONF_NODE = "node"
 CONF_KEY = "key"
 CONF_MOTOR_ADDRESS = "motor_address"
 CONF_MY_PATTERN = "my_pattern"
+CONF_INVERT = "invert"
 
 IOHCCover = iohc_ns.class_("IOHCCover", cover.Cover, cg.Component)
 
@@ -96,6 +97,20 @@ CONFIG_SCHEMA = cover.cover_schema(IOHCCover, device_class="shutter").extend(
         # Assistant afterward without reflashing; once toggled, the
         # persisted NVS value wins over this YAML default from then on.
         cv.Optional(CONF_MY_PATTERN, default="auto"): cv.one_of("auto", "simple", "extended", lower=True),
+        # Some installations have both motor axes wired/configured so HA's
+        # own open=extended, close=retracted convention comes out backwards
+        # (reported: GitHub issue #3 - an awning where Open retracted it and
+        # Close extended it). Swaps which RemoteButton actually gets sent
+        # for Open/Close at the component boundary, and mirrors the
+        # position estimate and 2W feedback back to HA-space, so the entity
+        # reports the same orientation it accepts - see iohc_cover.cpp's
+        # control()/loop()/update_real_position_authoritative() for the
+        # full picture of what that touches. This is only a first-boot
+        # seed, not a hard lock - the per-cover Invert Direction switch
+        # (config entity, components/iohc/switch/) can flip it live from
+        # Home Assistant afterward without reflashing, same as my_pattern
+        # above.
+        cv.Optional(CONF_INVERT, default=False): cv.boolean,
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -131,3 +146,6 @@ async def to_code(config):
     # My Pattern switch (components/iohc/switch/) is toggled from HA, that
     # persisted value wins over this YAML default from then on.
     cg.add(var.set_my_pattern_default_extended(my_pattern_extended))
+
+    # Same first-boot-seed-only pattern as my_pattern above.
+    cg.add(var.set_invert_default(config[CONF_INVERT]))

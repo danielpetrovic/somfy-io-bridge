@@ -49,6 +49,20 @@ class IOHCCover : public cover::Cover, public Component {
   // own pattern exactly. See IOHC::RemoteButton::Vent/SetMy in
   // iohc_remote1w.h for what this actually controls.
   void set_my_pattern_extended(bool extended);
+
+  // Compile-time seed only - resolved from cover/__init__.py's invert
+  // option, called by codegen before setup()/cover_prefs_ exist. Only
+  // used as the NVS fallback on first-ever boot - see setup() and
+  // set_invert() below for the actual live value control()/loop() use.
+  void set_invert_default(bool invert) { invert_default_ = invert; }
+
+  bool get_invert() const { return invert_; }
+  // Invert Direction switch's write_state() entry point - persists to NVS
+  // and updates the live value, mirrors set_my_pattern_extended()'s own
+  // pattern exactly. See control()'s own comments for what this actually
+  // flips (which RemoteButton gets sent, and the HA-space/motor-space
+  // conversion on both the command and position-readback sides).
+  void set_invert(bool invert);
   // Optional (6/32 hex chars). If both set, the bonded identity comes from
   // YAML/secrets.yaml instead of being randomly generated into this board's
   // own flash - see IOHC::IOHCRemote1W::begin() for why.
@@ -111,6 +125,8 @@ class IOHCCover : public cover::Cover, public Component {
   uint8_t manufacturer_{2};
   bool my_pattern_default_extended_{true};
   bool my_pattern_extended_{true};
+  bool invert_default_{false};
+  bool invert_{false};
   std::string fixed_node_hex_;
   std::string fixed_key_hex_;
   std::string nvs_key_;

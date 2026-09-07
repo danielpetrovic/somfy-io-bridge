@@ -19,6 +19,11 @@
 # resolve from `device_class` above (blind -> extended, everything else ->
 # simple); override to "simple"/"extended" only if a specific motor needs
 # the other pattern despite its device_class.
+# `invert` swaps which RemoteButton actually gets sent for Open/Close, for
+# an installation where HA's own open=extended/close=retracted convention
+# comes out physically backwards (GitHub issue #3) - see cover/__init__.py's
+# own comment for the full picture. Leave as false unless you've confirmed
+# this specific cover needs it.
 substitutions:
   cover_id: "changeme"
   cover_name: "Change Me"
@@ -28,6 +33,7 @@ substitutions:
   broadcast_type: "0"
   motor_address: ""
   my_pattern: "auto"
+  invert: "false"
 
 cover:
   - platform: iohc
@@ -46,6 +52,7 @@ cover:
     broadcast_type: ${broadcast_type}
     motor_address: ${motor_address}
     my_pattern: ${my_pattern}
+    invert: ${invert}
 
 button:
   # Single button, matching the physical remote's own labeling (PROG) and
@@ -163,4 +170,20 @@ switch:
     icon: mdi:blinds-horizontal
     device_id: ${cover_id}_device
     cover_id: ${cover_id}
+    type: my_pattern
+    entity_category: config
+  # On = swap Open/Close at the wire level (GitHub issue #3 - an
+  # installation where both were physically backwards from HA's own
+  # open=extended/close=retracted convention). Off = normal, unswapped.
+  # Starts from the invert substitution above (default false) - once
+  # toggled here, the choice persists in NVS and the YAML default no
+  # longer applies. See IOHCCover::control()'s own comments for exactly
+  # what this flips.
+  - platform: iohc
+    id: ${cover_id}_invert
+    name: "Invert Direction"
+    icon: mdi:swap-vertical
+    device_id: ${cover_id}_device
+    cover_id: ${cover_id}
+    type: invert
     entity_category: config
