@@ -111,10 +111,27 @@ namespace IOHC {
             // automation layer.
             static constexpr uint32_t MIN_INTER_SEND_US = 500000;  // 500ms
 
+            // Real-world incident (GitHub issue #5): onTxTicker() only ever
+            // returned to RX via the TXDONE success path - if the DIO0 ISR
+            // missed the edge and the REG_IRQFLAGS2 poll fallback also
+            // missed it, the ticker just kept re-firing and returning early
+            // forever, leaving the PA keyed as TRANSMITTER indefinitely
+            // (jamming reception for every io device in range, including
+            // the physical Situo remotes, with no self-healing since WiFi/
+            // API/logging all keep running normally). This is a wall-clock
+            // deadline (not a tick count, since repeatTime varies per
+            // packet) on how long a single on-air attempt is allowed to
+            // wait for TXDONE before onTxTicker() gives up and forces the
+            // radio back to RX itself. Real frame airtime here is well
+            // under 100ms, so this is a generous margin with no realistic
+            // false-positive risk.
+            static constexpr uint32_t TX_TIMEOUT_US = 1000000;  // 1s
+            uint32_t tx_attempt_started_us_ = 0;
+
             static iohcRadio *_iohcRadio;
             static uint8_t _flags[2];
             volatile static unsigned long _g_payload_millis;
-            
+
             volatile static bool send_lock;
 
             volatile uint32_t tickCounter = 0;
