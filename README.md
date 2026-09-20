@@ -14,7 +14,7 @@ Drives the board's onboard SX1276 radio directly at the register level (no ESPHo
 
 Somfy IO (io-homecontrol) is a different protocol on a different frequency from Somfy RTS (one-way, rolling code). If your motor/remote actually speaks RTS instead, see [`somfy-rts-bridge`](https://github.com/danielpetrovic/somfy-rts-bridge) - check your motor/remote's own documentation (or the frequency printed on it) to know which protocol it actually speaks.
 
-**Status**: Stable for 1W (one-way) control - real-world daily use across 14 physical shutters. 2W (two-way) control/position-feedback is implemented but this bridge's own 2W bonding has never yet succeeded against real hardware - see [2W bonding: current status and open problem](#2w-bonding-current-status-and-open-problem) below.
+**Status**: Stable for 1W (one-way) cover control - real-world daily use across 14 physical shutters. 2W (two-way) control/position-feedback is implemented but this bridge's own 2W bonding has never yet succeeded against real hardware - see [2W bonding: current status and open problem](#2w-bonding-current-status-and-open-problem) below. Dimmable light support is **BETA** - confirmed against exactly one real installation so far, see [Dimmable light support](#dimmable-light-support-beta) below.
 
 ### Cover device classes
 
@@ -245,6 +245,18 @@ If you've made progress on this, or have a working real bonding capture from a d
 
 `broadcast_type` (per cover, default `0` = "All") controls which device-class group the `Add`/`Pair` broadcast targets - see `sDevicesType` in `components/iohc/iohc_utils.h` for the full list. The default is confirmed working against real shutter motors; there should be no need to change it.
 
+## Dimmable light support (BETA)
+
+A separate io dimming receiver (not a wall dimmer, not a luminaire with its own built-in receiver) driving a conventional light circuit, controlled the same way a cover is - reported and confirmed working against real hardware in [GitHub issue #2](https://github.com/danielpetrovic/somfy-io-bridge/issues/2). **BETA**: confirmed on exactly one real installation so far, using `components/iohc_light/` - a separate component from the cover platform (`components/iohc/`), not a new cover mode.
+
+A real `light:` entity, not a `cover:` workaround - brightness only (`ColorMode::BRIGHTNESS`, on/off + brightness, no color or color temperature claim, since nothing about that has been confirmed). Setting a level is direct and optimistic: the receiver accepts an absolute brightness level and runs its own short internal fade to it (confirmed ~2-3s against real hardware), so unlike the cover platform's `Position` mode there is no local travel-time estimate at all - the requested level is sent once, and Home Assistant shows it immediately.
+
+None of the cover-specific concepts apply here, deliberately: no [Modes](#modes) select (there's nothing to send other than an absolute level), no [Direction inversion](#direction-inversion) (a brightness level has no direction to invert), no [Travel time](#travel-time) numbers (nothing to estimate or ramp). What does carry over: pairing works exactly the same way (`Program (1W)` button, same PROG-on-the-physical-remote-then-press-it procedure), and the underlying wire command is the exact same one already proven for cover `Position` mode (`cmd 0x00`, `(100-p)*2` in `main[0]`) - brightness percent maps directly onto that.
+
+Setup: `somfy-io-light.yaml` (reusable per-light package, mirrors `somfy-io-cover.yaml`'s own structure) with `light_id`, `light_name`, `node`/`key` (same fixed-identity mechanism as covers), and `broadcast_type` (default `"6"` = "Light" per `sDevicesType`, confirmed against real hardware). `${light_id}_device` must exist in the main file's `esphome.devices` list, same as a cover.
+
+If you have an io dimmer/light and this works (or doesn't) for you, please report back on [issue #2](https://github.com/danielpetrovic/somfy-io-bridge/issues/2) - this is what real-hardware confirmation on a second installation would look like, and is what turns this from BETA into a real release.
+
 ## Scope and status
 
 **Implemented (1W, one-way commands):**
@@ -276,6 +288,8 @@ All of the above confirmed working against real motors, including pairing/unpair
   - `iohc_remote1w.*`: the command/pairing layer (Add/Remove/Open/Close/Stop/Vent/SetMy/Position/Identify), rewritten around ESPHome's `Preferences`-backed persistence instead of upstream's JSON-file + MQTT model.
   - `iohc_blind_position.*`: the local travel-time position estimator, per-cover configurable (default 25s open/close, see [Travel time](#travel-time)), used for the cosmetic "still moving" animation in `Position` mode and the only position signal at all in `Open / My / Close` mode (see [Modes](#modes)).
   - `cover/`, `button/`, `select/`, `switch/`, `number/`: the ESPHome platform integration. `button/`, `switch/`, and `number/` each dispatch multiple entity types via their own `type:` field (switch: Tilt Support/Invert Direction; number: Travel Time Open/Close); `select/` implements one entity type (Mode).
+- `somfy-io-light.yaml`: reusable per-light package (BETA, see [Dimmable light support](#dimmable-light-support-beta)) - light + Program button, instantiated per light via substitution variables (`light_id`, `light_name`, `node`, `key`, `broadcast_type`).
+- `components/iohc_light/`: a separate `external_component` from `components/iohc/` above (same repo, same git fetch, just its own top-level component folder) - only `light/` (the dimmable light entity) and `button/` (its own Program (1W) button, kept separate from `components/iohc/button/`'s cover-oriented one rather than generalizing it - see that button's own header comment for why). Depends on `components/iohc/` for the actual radio hub and command layer (`IOHC::iohcRadio`, `IOHC::IOHCRemote1W`) rather than duplicating either.
 
 ## OLED display
 

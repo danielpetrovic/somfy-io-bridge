@@ -1,0 +1,57 @@
+# Reusable per-light package for the Somfy IO bridge - BETA, GitHub issue #2.
+# Included once per physical io dimmer/light from somfy-io-bridge.yaml with a
+# unique `light_id` (used to build entity/component IDs), `light_name`
+# (documentation only - keep it identical to the matching entry's `name:` in
+# the main file's `esphome.devices` list, same reasoning as the cover
+# package's own `cover_name`), `node`/`key` (fixed bonded identity from
+# secrets.yaml - leave both as empty strings to auto-generate and persist
+# on-device instead, see README's "Board-independent identity" section), and
+# optionally `broadcast_type` (default "6" = "Light" per sDevicesType in
+# components/iohc/iohc_utils.h - confirmed against real hardware, GitHub
+# issue #2; only override if a specific installation needs a different
+# group).
+# `${light_id}_device` must exist in the main file's `esphome.devices` list,
+# this is what makes each light show up as its own HA device.
+#
+# BETA: unlike the cover platform, this has been validated against exactly
+# one physical installation (a single reporter's io dimming receiver, see
+# GitHub issue #2) - brightness levels 25/50/75/100% each confirmed to land
+# at a distinguishable, correct brightness. No Mode select, no Invert
+# Direction, no Travel Time Open/Close - none of those apply here: the
+# light accepts an absolute level directly and runs its own short internal
+# fade to it (confirmed ~2-3s, too short to bother modeling), so there is no
+# local ramp/estimate to configure, invert, or select a mode for.
+substitutions:
+  light_id: "changeme"
+  light_name: "Change Me"
+  node: ""
+  key: ""
+  broadcast_type: "6"
+
+light:
+  - platform: iohc_light
+    id: ${light_id}
+    # Empty name marks this as the device's primary entity - same
+    # reasoning as the cover platform's own empty `name:`.
+    name: ""
+    device_id: ${light_id}_device
+    node: ${node}
+    key: ${key}
+    broadcast_type: ${broadcast_type}
+    # ESPHome's own software transition is turned off deliberately - the
+    # receiver already runs its own ~2-3s fade to the requested level, so a
+    # software transition on top would just be a second, redundant fade
+    # racing the real one. See iohc_light.cpp's write_state() for the
+    # direct/optimistic set this relies on.
+    default_transition_length: 0s
+
+button:
+  # Same procedure as the cover platform's own Program (1W) button - see
+  # components/iohc_light/button/iohc_light_program_button.h for why this
+  # is its own class rather than reusing that one.
+  - platform: iohc_light
+    id: ${light_id}_prog
+    name: "Program (1W)"
+    device_id: ${light_id}_device
+    light_id: ${light_id}
+    entity_category: config
