@@ -254,6 +254,9 @@ If you've made progress on this, or have a working real bonding capture from a d
 - `Set My`, reprogramming the motor's own stored favorite position to the cover's current physical position - both patterns confirmed working end-to-end on real hardware, see [My and Set My](#my-and-set-my) above.
 - Identify / Start Identify / Stop Identify (`cmd=0x1E`) - best-guess frames, confirmed working against real hardware, see [Identify](#identify) above.
 - Per-cover selectable mode (`Position` / `Open / My / Close` / `Two-Way (Experimental)` - control path implemented, but this bridge's own 2W bonding has not yet succeeded against real hardware, see [Modes](#modes) above).
+- Per-cover Invert Direction switch, for installations where this bridge's own Open/Close convention comes out physically backwards from Home Assistant's - see [Direction inversion](#direction-inversion) above.
+- Per-cover configurable travel time (Travel Time Open/Close number entities), replacing a single fixed 25s value that couldn't fit every installation - see [Travel time](#travel-time) above.
+- 1W TX now recovers on its own if a transmission's completion is never confirmed (missed interrupt, stuck radio flag), instead of leaving the radio keyed indefinitely until power-cycled.
 
 All of the above confirmed working against real motors, including pairing/unpairing multiple physical shutters end-to-end.
 
@@ -266,13 +269,13 @@ All of the above confirmed working against real motors, including pairing/unpair
 ## Files
 
 - `somfy-io-bridge.yaml`: the device config (radio setup, Wi-Fi/API/OTA, OLED display, diagnostic entities (WiFi Signal, Uptime, Loop Time, Restart Reason, Restart), configuration entities (Display, Display Brightness, Display Page Interval), Debug Logging / Debug Channel Hop (2W) / Debug Passive Decode (2W) control switches, and one `packages:` entry per physical cover).
-- `somfy-io-cover.yaml`: reusable package template (cover + Program button + My button + Set My button + Identify/Start/Stop Identify buttons + Mode select + Tilt Support switch + Invert Direction switch), instantiated per cover via substitution variables (`cover_id`, `cover_name`, `device_class`, `node`, `key`, `broadcast_type`, `motor_address` - required for Program (2W)/Two-Way mode, see [Pairing](#pairing-and-unpairing-a-cover-to-its-motor), `my_pattern` - see [Tilt Support switch](#tilt-support-switch), `invert` - see [Direction inversion](#direction-inversion)).
+- `somfy-io-cover.yaml`: reusable package template (cover + Program button + My button + Set My button + Identify/Start/Stop Identify buttons + Mode select + Tilt Support switch + Invert Direction switch + Travel Time Open/Close numbers), instantiated per cover via substitution variables (`cover_id`, `cover_name`, `device_class`, `node`, `key`, `broadcast_type`, `motor_address` - required for Program (2W)/Two-Way mode, see [Pairing](#pairing-and-unpairing-a-cover-to-its-motor), `my_pattern` - see [Tilt Support switch](#tilt-support-switch), `invert` - see [Direction inversion](#direction-inversion), `travel_time_open`/`travel_time_close` - see [Travel time](#travel-time)).
 - `components/iohc/`: this repo's own `external_component` - fetched automatically via `external_components: type: git` in `somfy-io-bridge.yaml` (see Setup above), no manual copying needed.
-  - Flat directory (no subdirectories except `cover/`, `button/`, `select/`, `switch/`) - matches both git-source's auto-detection (`components/` at the repo root) and, historically, the only structure ESPHome's local-component loader supports, if you ever switch back to `type: local` for local development - see the comment in `iohc.h` for why.
+  - Flat directory (no subdirectories except `cover/`, `button/`, `select/`, `switch/`, `number/`) - matches both git-source's auto-detection (`components/` at the repo root) and, historically, the only structure ESPHome's local-component loader supports, if you ever switch back to `type: local` for local development - see the comment in `iohc.h` for why.
   - `iohcRadio.*`, `iohcPacket.*`, `SX1276Helpers.*`, `sx1276Regs-Fsk.h`, `TickerUsESP32.*`, `Delegate.h`: vendored radio/protocol layer, near-verbatim from upstream.
   - `iohc_remote1w.*`: the command/pairing layer (Add/Remove/Open/Close/Stop/Vent/SetMy/Position/Identify), rewritten around ESPHome's `Preferences`-backed persistence instead of upstream's JSON-file + MQTT model.
-  - `iohc_blind_position.*`: the local travel-time position estimator, fixed 25s open/close, used only for the cosmetic "still moving" animation in `Position` mode (see [Modes](#modes)).
-  - `cover/`, `button/`, `select/`, `switch/`: the ESPHome platform integration. `button/` and `switch/` each dispatch multiple entity types via their own `type:` field (switch: Tilt Support/Invert Direction); `select/` implements one entity type (Mode).
+  - `iohc_blind_position.*`: the local travel-time position estimator, per-cover configurable (default 25s open/close, see [Travel time](#travel-time)), used for the cosmetic "still moving" animation in `Position` mode and the only position signal at all in `Open / My / Close` mode (see [Modes](#modes)).
+  - `cover/`, `button/`, `select/`, `switch/`, `number/`: the ESPHome platform integration. `button/`, `switch/`, and `number/` each dispatch multiple entity types via their own `type:` field (switch: Tilt Support/Invert Direction; number: Travel Time Open/Close); `select/` implements one entity type (Mode).
 
 ## OLED display
 
