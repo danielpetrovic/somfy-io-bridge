@@ -833,6 +833,16 @@ namespace IOHC {
                          node_[1], node_[2]);
                 break;
             }
+
+            case RemoteButton::Prog2W:
+                // Never actually reached here at runtime - intercepted
+                // earlier by iohc_button.cpp's own dispatch
+                // (IOHCCover::press_prog2w() instead), see this enum
+                // value's own comment in iohc_remote1w.h for why it's not
+                // a real 1W wire command at all. Explicit case (not a
+                // default:) so a genuinely new, unhandled RemoteButton
+                // added later still trips this same -Wswitch warning.
+                break;
         }
     }
 }

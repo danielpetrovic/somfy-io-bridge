@@ -19,6 +19,18 @@
 # resolve from `device_class` above (blind -> extended, everything else ->
 # simple); override to "simple"/"extended" only if a specific motor needs
 # the other pattern despite its device_class.
+# `invert` swaps which RemoteButton actually gets sent for Open/Close, for
+# an installation where HA's own open=extended/close=retracted convention
+# comes out physically backwards (GitHub issue #3) - see cover/__init__.py's
+# own comment for the full picture. Leave as false unless you've confirmed
+# this specific cover needs it.
+# `travel_time_open`/`travel_time_close` seed the local BlindPosition
+# estimate's run time in seconds (GitHub issue #4 - one fixed 25s value
+# couldn't fit two differently-geared covers on the same board). Purely
+# cosmetic in Mode::POSITION, but affects how closely the displayed
+# position tracks reality in Mode::MY - see cover/__init__.py's own comment
+# for the full picture. Leave at 25 unless you've timed this specific
+# cover's real travel with a stopwatch.
 substitutions:
   cover_id: "changeme"
   cover_name: "Change Me"
@@ -28,6 +40,9 @@ substitutions:
   broadcast_type: "0"
   motor_address: ""
   my_pattern: "auto"
+  invert: "false"
+  travel_time_open: "25"
+  travel_time_close: "25"
 
 cover:
   - platform: iohc
@@ -46,6 +61,9 @@ cover:
     broadcast_type: ${broadcast_type}
     motor_address: ${motor_address}
     my_pattern: ${my_pattern}
+    invert: ${invert}
+    travel_time_open: ${travel_time_open}
+    travel_time_close: ${travel_time_close}
 
 button:
   # Single button, matching the physical remote's own labeling (PROG) and
@@ -163,4 +181,45 @@ switch:
     icon: mdi:blinds-horizontal
     device_id: ${cover_id}_device
     cover_id: ${cover_id}
+    type: my_pattern
+    entity_category: config
+  # On = swap Open/Close at the wire level (GitHub issue #3 - an
+  # installation where both were physically backwards from HA's own
+  # open=extended/close=retracted convention). Off = normal, unswapped.
+  # Starts from the invert substitution above (default false) - once
+  # toggled here, the choice persists in NVS and the YAML default no
+  # longer applies. See IOHCCover::control()'s own comments for exactly
+  # what this flips.
+  - platform: iohc
+    id: ${cover_id}_invert
+    name: "Invert Direction"
+    icon: mdi:swap-vertical
+    device_id: ${cover_id}_device
+    cover_id: ${cover_id}
+    type: invert
+    entity_category: config
+
+# Seconds the local BlindPosition estimate takes to run from one extreme to
+# the other (GitHub issue #4). Starts from the travel_time_open/
+# travel_time_close substitutions above (default 25s each) - once changed
+# here, the choice persists in NVS and the YAML default no longer applies.
+# Always HA-space regardless of Invert Direction - see
+# IOHCCover::apply_travel_times_() for the raw-space mapping. See
+# components/iohc/number/__init__.py.
+number:
+  - platform: iohc
+    id: ${cover_id}_travel_time_open
+    name: "Travel Time Open"
+    icon: mdi:timer-outline
+    device_id: ${cover_id}_device
+    cover_id: ${cover_id}
+    type: travel_time_open
+    entity_category: config
+  - platform: iohc
+    id: ${cover_id}_travel_time_close
+    name: "Travel Time Close"
+    icon: mdi:timer-outline
+    device_id: ${cover_id}_device
+    cover_id: ${cover_id}
+    type: travel_time_close
     entity_category: config

@@ -37,8 +37,33 @@
 #define SPI_Write   0x80
 #define SPI_Read    0x00
 
-#define TxReady  {while (!(readByte(REG_IRQFLAGS1) & RF_IRQFLAGS1_TXREADY));}   // Check for TxReady flag
-#define RxReady  {while (!(readByte(REG_IRQFLAGS1) & RF_IRQFLAGS1_PLLLOCK));}   // Check for PllLock flag; do not use with sequencer
+// GitHub issue #5: these were unconditional while(!flag); spins - if the
+// underlying SPI/PLL never raises the ready flag (chip fault, bad SPI
+// transaction), setTx()/setRx() never returns and the CPU hangs with the PA
+// already keyed as TRANSMITTER (REG_OPMODE is written *before* this wait).
+// That's the same "keyed forever" hazard as onTxTicker()'s own missing
+// TXDONE deadline, just one layer lower - a wall-clock timeout in the
+// ticker alone can't reach a CPU stuck inside setTx() itself. Real
+// TXREADY/PLL lock happens in well under 1ms, so this bound is generous.
+#define READY_MAX_POLLS 100000u
+#define TxReady  { \
+    uint32_t _tx_ready_polls = 0; \
+    while (!(readByte(REG_IRQFLAGS1) & RF_IRQFLAGS1_TXREADY)) { \
+        if (++_tx_ready_polls > READY_MAX_POLLS) { \
+            ESP_LOGE(TAG, "TxReady: TXREADY flag never set after %u polls - proceeding anyway", READY_MAX_POLLS); \
+            break; \
+        } \
+    } \
+}   // Check for TxReady flag, bounded
+#define RxReady  { \
+    uint32_t _rx_ready_polls = 0; \
+    while (!(readByte(REG_IRQFLAGS1) & RF_IRQFLAGS1_PLLLOCK)) { \
+        if (++_rx_ready_polls > READY_MAX_POLLS) { \
+            ESP_LOGE(TAG, "RxReady: PLLLOCK flag never set after %u polls - proceeding anyway", READY_MAX_POLLS); \
+            break; \
+        } \
+    } \
+}   // Check for PllLock flag; do not use with sequencer, bounded
 
 #define RF_PACKETCONFIG2_IOHOME_POWERFRAME  0x10    // Missing from SX1276 FSK modem registers and bits definitions
 

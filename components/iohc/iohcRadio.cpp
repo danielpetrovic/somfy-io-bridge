@@ -371,6 +371,7 @@ void iohcRadio::startQueuedSend() {
     Radio::clearFlags();
     Radio::writeBytes(REG_FIFO, packet->payload.buffer, packet->buffer_length);
     Radio::setTx();
+    tx_attempt_started_us_ = esp_timer_get_time();
     //packetStamp = esp_timer_get_time();
     //packet->decode(true); //false);
     //IOHC::lastSendCmd = packet->payload.packet.header.cmd;
@@ -407,6 +408,33 @@ void iohcRadio::onTxTicker(void *arg) {
 
     // ⏳ Wait for TXDONE
     if (!radio->txComplete) {
+        // GitHub issue #5: no deadline here previously - a missed TXDONE
+        // edge (ISR and the REG_IRQFLAGS2 fallback both miss it) meant this
+        // branch returned early forever, leaving the PA keyed as
+        // TRANSMITTER indefinitely. Give up after TX_TIMEOUT_US and force
+        // the radio back to RX ourselves rather than waiting on a
+        // confirmation that may never arrive.
+        uint32_t waited_us = esp_timer_get_time() - radio->tx_attempt_started_us_;
+        if (waited_us >= TX_TIMEOUT_US) {
+            ESP_LOGE(TAG, "TX: TXDONE timeout after %lu us waiting on packet %d/%d (state=%s) - "
+                          "aborting TX and forcing radio back to RX",
+                     (unsigned long) waited_us, radio->txCounter + 1, (int) radio->packets2send.size(),
+                     radioStateToString(radio->radioState));
+            // Free every packet from the stuck one onward - the success
+            // path only hands a packet to sent()/delete once it actually
+            // finishes, so nothing else owns these.
+            for (size_t i = radio->txCounter; i < radio->packets2send.size(); i++) {
+                delete radio->packets2send[i];
+            }
+            radio->Sender.detach();
+            radio->packets2send.clear();
+            radio->txComplete = false;
+            Radio::setRx();
+            radio->setRadioState(RadioState::RX);
+            // Don't strand a batch that was queued behind this one.
+            radio->startQueuedSend();
+            return;
+        }
         ESP_LOGV(TAG, "TX: Waiting for TXDONE... (state=%s)", radioStateToString(radio->radioState));
         return;
     }
@@ -454,6 +482,7 @@ void iohcRadio::onTxTicker(void *arg) {
     Radio::clearFlags();
     Radio::writeBytes(REG_FIFO, packet->payload.buffer, packet->buffer_length);
     Radio::setTx();
+    radio->tx_attempt_started_us_ = esp_timer_get_time();
     //packetStamp = esp_timer_get_time();
     //packet->decode(true); //false);
     //IOHC::lastSendCmd = packet->payload.packet.header.cmd;
@@ -497,7 +526,17 @@ bool queueCallback(IohcPacketDelegate* callback, iohcPacket* packet) {
             packet->decode(true);
             addLogMessage(String(packet->decodeToString(true).c_str()));
         }
-        if (txCB && !queueCallback(&txCB, packet)) {
+        // txCB is never actually set (iohc.cpp's start() call passes
+        // nullptr for it), so the old `if (txCB && ...)` guard meant every
+        // successfully-transmitted packet leaked, unconditionally, on
+        // every single TX. queueCallback() only takes ownership when a
+        // callback is actually registered to receive it; otherwise this
+        // function is the sole owner and must free it itself.
+        if (txCB) {
+            if (!queueCallback(&txCB, packet)) {
+                delete packet;
+            }
+        } else {
             delete packet;
         }
         return ret;

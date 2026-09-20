@@ -96,7 +96,7 @@ bool IOHCComponent::on_receive(IOHC::iohcPacket *packet) {
     return false;
   }
 
-  ESP_LOGI(TAG, "Frame #%u received, length=%u, rssi=%.1f dBm", this->packets_received_, packet->buffer_length,
+  ESP_LOGI(TAG, "Frame #%lu received, length=%u, rssi=%.1f dBm", this->packets_received_, packet->buffer_length,
            packet->rssi);
 
   // This bridge's own 2W bonding (Phase 3) - only ever consumes a frame
