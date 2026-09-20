@@ -63,6 +63,27 @@ class IOHCCover : public cover::Cover, public Component {
   // flips (which RemoteButton gets sent, and the HA-space/motor-space
   // conversion on both the command and position-readback sides).
   void set_invert(bool invert);
+
+  // Compile-time seeds only - resolved from cover/__init__.py's
+  // travel_time_open/travel_time_close options, called by codegen before
+  // setup()/cover_prefs_ exist. Only used as the NVS fallback on
+  // first-ever boot - see setup() and set_travel_time_open()/
+  // set_travel_time_close() below for the actual live values.
+  void set_travel_time_open_default(uint32_t seconds) { travel_time_open_default_ = seconds; }
+  void set_travel_time_close_default(uint32_t seconds) { travel_time_close_default_ = seconds; }
+
+  // These are always in HA space (matches what the "Travel Time Open"/
+  // "Travel Time Close" number entities display) - GitHub issue #4's own
+  // ask, so a user's "open" here always means what HA calls open,
+  // regardless of Invert Direction. apply_travel_times_() is what
+  // translates that into the raw/motor-space assignment BlindPosition
+  // actually needs (see its own comment for why that mapping has to
+  // flip when invert_ is on).
+  uint32_t get_travel_time_open() const { return travel_time_open_; }
+  void set_travel_time_open(uint32_t seconds);
+  uint32_t get_travel_time_close() const { return travel_time_close_; }
+  void set_travel_time_close(uint32_t seconds);
+
   // Optional (6/32 hex chars). If both set, the bonded identity comes from
   // YAML/secrets.yaml instead of being randomly generated into this board's
   // own flash - see IOHC::IOHCRemote1W::begin() for why.
@@ -118,9 +139,26 @@ class IOHCCover : public cover::Cover, public Component {
 
   IOHCComponent *parent_{};
   IOHC::IOHCRemote1W remote_;
-  // Fixed, not user-configurable - purely cosmetic (see Mode::POSITION).
-  static constexpr uint32_t TRAVEL_TIME_OPEN = 25;
-  static constexpr uint32_t TRAVEL_TIME_CLOSE = 25;
+  // Real defaults (GitHub issue #4 - one fixed 25s constant couldn't fit
+  // two differently-geared covers on the same board, or even both
+  // directions of the same cover). Purely cosmetic in Mode::POSITION
+  // (real commands carry an exact percentage, the motor lands there
+  // regardless of this estimate's accuracy) but genuinely affects how
+  // closely the displayed position tracks reality in Mode::MY, where
+  // Open/Close never carry a percentage at all and this estimate is the
+  // only thing driving the displayed position while moving.
+  uint32_t travel_time_open_default_{25};
+  uint32_t travel_time_close_default_{25};
+  uint32_t travel_time_open_{25};
+  uint32_t travel_time_close_{25};
+  // Pushes travel_time_open_/travel_time_close_ into remote_, swapping
+  // which one lands in BlindPosition's raw-space "open" slot vs "close"
+  // slot when invert_ is on - travel_time_open_/close_ themselves always
+  // stay in HA space (see their own comment), but BlindPosition's
+  // startOpening()/startClosing() operate in raw/motor space, same
+  // reasoning as target_raw_opening_ below. Called from setup() and
+  // whenever invert_, travel_time_open_, or travel_time_close_ change.
+  void apply_travel_times_();
   uint8_t type_{0};
   uint8_t manufacturer_{2};
   bool my_pattern_default_extended_{true};

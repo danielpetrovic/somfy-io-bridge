@@ -37,6 +37,8 @@ CONF_KEY = "key"
 CONF_MOTOR_ADDRESS = "motor_address"
 CONF_MY_PATTERN = "my_pattern"
 CONF_INVERT = "invert"
+CONF_TRAVEL_TIME_OPEN = "travel_time_open"
+CONF_TRAVEL_TIME_CLOSE = "travel_time_close"
 
 IOHCCover = iohc_ns.class_("IOHCCover", cover.Cover, cg.Component)
 
@@ -111,6 +113,24 @@ CONFIG_SCHEMA = cover.cover_schema(IOHCCover, device_class="shutter").extend(
         # Home Assistant afterward without reflashing, same as my_pattern
         # above.
         cv.Optional(CONF_INVERT, default=False): cv.boolean,
+        # One fixed 25s constant couldn't fit two differently-geared covers
+        # on the same board, or even both directions of the same cover
+        # (GitHub issue #4 - real stopwatch data: 45s vs 25s on one axis,
+        # 12-15s vs 25s on another, errors running in opposite directions
+        # on the same board). Purely cosmetic in Mode::POSITION (the real
+        # command always carries an exact percentage, the motor lands
+        # there regardless), but genuinely affects how closely the
+        # displayed position tracks reality in Mode::MY, where Open/Close
+        # never carry a percentage and this estimate is the only thing
+        # driving what HA shows while moving. Always HA-space (matches
+        # what the "Travel Time Open"/"Travel Time Close" number entities
+        # display), independent of Invert Direction - see
+        # apply_travel_times_() in iohc_cover.cpp for the raw-space
+        # mapping. First-boot seed only, same as my_pattern/invert above -
+        # the per-cover number entities (components/iohc/number/) can
+        # change it live from Home Assistant afterward without reflashing.
+        cv.Optional(CONF_TRAVEL_TIME_OPEN, default=25): cv.int_range(min=1, max=120),
+        cv.Optional(CONF_TRAVEL_TIME_CLOSE, default=25): cv.int_range(min=1, max=120),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -149,3 +169,6 @@ async def to_code(config):
 
     # Same first-boot-seed-only pattern as my_pattern above.
     cg.add(var.set_invert_default(config[CONF_INVERT]))
+
+    cg.add(var.set_travel_time_open_default(config[CONF_TRAVEL_TIME_OPEN]))
+    cg.add(var.set_travel_time_close_default(config[CONF_TRAVEL_TIME_CLOSE]))

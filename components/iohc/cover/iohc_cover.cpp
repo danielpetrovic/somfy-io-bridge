@@ -44,8 +44,10 @@ void IOHCCover::setup() {
   // under the 15-char key limit, no truncation risk.
   invert_ = cover_prefs_.getBool("invert", invert_default_);
 
-  remote_.set_travel_time_open(TRAVEL_TIME_OPEN);
-  remote_.set_travel_time_close(TRAVEL_TIME_CLOSE);
+  // "travel_open"/"travel_close" - well under the 15-char NVS key limit.
+  travel_time_open_ = cover_prefs_.getUInt("travel_open", travel_time_open_default_);
+  travel_time_close_ = cover_prefs_.getUInt("travel_close", travel_time_close_default_);
+  apply_travel_times_();
 
   // Restore last known position (defaults to open if never set). Persisted
   // "position" is always HA-space (see control()/loop()'s own comments) -
@@ -97,6 +99,34 @@ void IOHCCover::set_my_pattern_extended(bool extended) {
 void IOHCCover::set_invert(bool invert) {
   invert_ = invert;
   cover_prefs_.putBool("invert", invert);
+  apply_travel_times_();
+}
+
+void IOHCCover::set_travel_time_open(uint32_t seconds) {
+  travel_time_open_ = seconds;
+  cover_prefs_.putUInt("travel_open", seconds);
+  apply_travel_times_();
+}
+
+void IOHCCover::set_travel_time_close(uint32_t seconds) {
+  travel_time_close_ = seconds;
+  cover_prefs_.putUInt("travel_close", seconds);
+  apply_travel_times_();
+}
+
+void IOHCCover::apply_travel_times_() {
+  // travel_time_open_/travel_time_close_ are always HA-space (see their own
+  // comment in iohc_cover.h); BlindPosition's startOpening()/startClosing()
+  // operate in raw/motor space, same open/close distinction as
+  // target_raw_opening_ elsewhere in this file - swap which value lands in
+  // which slot when Invert Direction is on.
+  if (invert_) {
+    remote_.set_travel_time_open(travel_time_close_);
+    remote_.set_travel_time_close(travel_time_open_);
+  } else {
+    remote_.set_travel_time_open(travel_time_open_);
+    remote_.set_travel_time_close(travel_time_close_);
+  }
 }
 
 void IOHCCover::loop() {
@@ -152,7 +182,7 @@ void IOHCCover::dump_config() {
       mode_ == Mode::POSITION ? "Position" : mode_ == Mode::MY ? "Open / My / Close" : "Two-Way (Experimental)";
   ESP_LOGCONFIG(TAG, "  Mode: %s", mode_name);
   ESP_LOGCONFIG(TAG, "  Invert Direction: %s", invert_ ? "yes" : "no");
-  ESP_LOGCONFIG(TAG, "  Travel time open/close: %lus / %lus (fixed)", TRAVEL_TIME_OPEN, TRAVEL_TIME_CLOSE);
+  ESP_LOGCONFIG(TAG, "  Travel time open/close: %lus / %lus", travel_time_open_, travel_time_close_);
 }
 
 cover::CoverTraits IOHCCover::get_traits() {
