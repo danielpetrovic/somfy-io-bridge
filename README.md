@@ -49,14 +49,13 @@ Install it in Home Assistant first: Settings → Apps → search "ESPHome" → I
 
 1. **Hardware**: LilyGO TTGO T3 LoRa32 **868MHz** V1.6.1 - nothing else needed. Pin mapping (confirmed against the official schematic) lives in `components/iohc/iohc_board_config.h`.
 2. **Place this bridge's files** - `somfy-io-bridge.yaml` and `somfy-io-cover.yaml` - under `/config/esphome/` on your Home Assistant instance. Any app that lets you browse/edit files under `/config` works for this - Studio Code Server, File Editor, or a Samba/SSH share to your PC are all fine. `components/iohc/` doesn't need copying anywhere - `somfy-io-bridge.yaml`'s `external_components:` points straight at this repo on GitHub, so ESPHome fetches it automatically at compile time.
-3. **Secrets**: add `wifi_ssid`, `wifi_password`, `io_bridge_api_key`, and `io_bridge_ota_password` to `secrets.yaml` under `/config/esphome/`. Two ways to get the values:
+3. **Secrets**: add `wifi_ssid`, `wifi_password`, and `io_bridge_api_key` to `secrets.yaml` under `/config/esphome/`. OTA updates use this same key (`ota: encryption:` with no key of its own inherits the `api:` one) rather than a separate password - no extra secret needed for that. Two ways to get the values:
 
    #### Normal flow (recommended)
 
    Entirely inside the ESPHome app, no terminal needed:
    - Open the ESPHome app → the "⋮" (three-dot) menu, top right → **Secrets**. Edits `secrets.yaml` directly inside the app, creating it if it doesn't exist yet.
    - For `io_bridge_api_key` (a base64-encoded 32-byte value): ESPHome's own site has a generator built into its docs, entirely client-side (nothing sent anywhere) - open [esphome.io/components/api](https://esphome.io/components/api/#configuration-variables), find the encryption key generator, and use its **Copy** button.
-   - For `io_bridge_ota_password`: no format requirement, just needs to exist - any password works, typed directly into the Secrets editor. For a random one instead of hand-picked, click **Regenerate** then **Copy** on that same generator page a second time.
    - This flow **doesn't** cover the optional fixed `node`/`key` device identity in step 4 below - that's not an ESPHome-recognized value, so it has no dedicated generator page; it always needs the Advanced flow.
 
    #### Advanced flow
@@ -67,7 +66,6 @@ Install it in Home Assistant first: Settings → Apps → search "ESPHome" → I
    wifi_ssid: "your_wifi_name"
    wifi_password: "your_wifi_password"
    io_bridge_api_key: "base64-encoded-32-byte-key"     # openssl rand -base64 32
-   io_bridge_ota_password: "some-password"             # openssl rand -hex 16
    ```
 4. **(Optional) Generate a fixed identity for the new cover** - via the Advanced flow above (see step 3), since this value has no ESPHome-provided generator. Not required - leave `node`/`key` as empty strings (the default) and the board generates a random identity itself on first boot, which works completely fine. The only reason to do this step is so that identity **survives a board replacement**: with the default random identity, a replacement board generates a *different* one and every motor needs re-pairing; with a fixed identity from `secrets.yaml`, a replacement board flashed with the same config reproduces the exact same identity, no re-pairing needed. Worth doing *before* pairing a new cover if you want this, since switching an already-paired cover from random to fixed later needs an unpair/re-pair cycle anyway - see [Board-independent identity](#board-independent-identity-surviving-a-board-replacement) below for the command.
 5. **Add a cover entry** for each physical cover under `packages:` in `somfy-io-bridge.yaml`, including the `node`/`key` from step 4 if you generated them (otherwise leave both as empty strings):

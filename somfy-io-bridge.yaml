@@ -21,7 +21,7 @@ esphome:
   friendly_name: Somfy IO Bridge
   project:
     name: "danielpetrovic.Somfy IO Bridge"
-    version: "1.0.0"
+    version: "1.0.1"
   # The vendored radio stack talks to the SX1276 directly via Arduino's SPI
   # library, and the Phase 2 pairing/command layer persists bonded remote
   # identities via Arduino's Preferences (NVS) library. Neither gets picked
@@ -136,7 +136,7 @@ api:
 
 ota:
   - platform: esphome
-    password: !secret io_bridge_ota_password
+    encryption:
 
 # level is the compile-time ceiling (VERY_VERBOSE keeps full protocol-decode
 # detail available); initial_level is what actually prints after boot, kept
