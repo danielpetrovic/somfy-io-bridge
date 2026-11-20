@@ -39,6 +39,8 @@ The examples below use `shutter` - substitute whichever matches your own devices
 
 ## Before you start
 
+**Requires ESPHome 2026.11.0 or newer.** ESPHome 2026.11 made the `relation` option mandatory for every entry under `esphome: devices:`, and older versions reject it, so the YAML in this repository only builds on 2026.11.0 or newer (the configuration stops with a clear version message otherwise). On older ESPHome, use the files from release `v1.0.1` instead.
+
 This is an **ESPHome** project, driven from Home Assistant's own **ESPHome app** (called an "add-on" before Home Assistant 2026.2 renamed these to "apps" - you'll still see the older name in older screenshots/guides), not a separate program you install on your PC. ESPHome itself is maintained by Nabu Casa, the same company behind Home Assistant, which is why it integrates this smoothly (auto-discovery, native API, OTA updates from within Home Assistant).
 
 Install it in Home Assistant first: Settings → Apps → search "ESPHome" → Install → Start (turning on "Show in sidebar" is convenient). This app is what compiles the `.yaml` files described in Setup below into firmware and flashes it onto the board - no PlatformIO, Arduino IDE, or separate `esphome` command-line install needed on your own computer.
@@ -68,7 +70,19 @@ Install it in Home Assistant first: Settings → Apps → search "ESPHome" → I
    io_bridge_api_key: "base64-encoded-32-byte-key"     # openssl rand -base64 32
    ```
 4. **(Optional) Generate a fixed identity for the new cover** - via the Advanced flow above (see step 3), since this value has no ESPHome-provided generator. Not required - leave `node`/`key` as empty strings (the default) and the board generates a random identity itself on first boot, which works completely fine. The only reason to do this step is so that identity **survives a board replacement**: with the default random identity, a replacement board generates a *different* one and every motor needs re-pairing; with a fixed identity from `secrets.yaml`, a replacement board flashed with the same config reproduces the exact same identity, no re-pairing needed. Worth doing *before* pairing a new cover if you want this, since switching an already-paired cover from random to fixed later needs an unpair/re-pair cycle anyway - see [Board-independent identity](#board-independent-identity-surviving-a-board-replacement) below for the command.
-5. **Add a cover entry** for each physical cover under `packages:` in `somfy-io-bridge.yaml`, including the `node`/`key` from step 4 if you generated them (otherwise leave both as empty strings):
+5. **Add an area + device entry** for each physical cover under `esphome:` in `somfy-io-bridge.yaml` - this is what makes the cover show up as its own HA device. Every device entry needs `relation: via` (required since ESPHome 2026.11):
+   ```yaml
+   esphome:
+     areas:
+       - id: my_room_area
+         name: "My Room" # must match an existing HA area name exactly, or HA creates a new one
+     devices:
+       - id: my_new_cover_io_device
+         name: "My Room Shutter" # include the room name here
+         area_id: my_room_area
+         relation: via
+   ```
+6. **Add a cover entry** for each physical cover under `packages:` in `somfy-io-bridge.yaml` (`cover_id` + `_device` must match the device `id` from step 5), including the `node`/`key` from step 4 if you generated them (otherwise leave both as empty strings):
    ```yaml
    packages:
      my_new_cover_io: !include
@@ -80,12 +94,12 @@ Install it in Home Assistant first: Settings → Apps → search "ESPHome" → I
          key: !secret io_my_new_cover_io_key
    ```
    This creates the cover plus its "Program" button (pairs and unpairs, like the physical remote's own PROG button), a "My" button, three Identify buttons (see [Identify](#identify)), and "Mode" select. See `somfy-io-cover.yaml` for the full set of optional vars (`device_class`, defaults to `shutter` - see [Cover device classes](#cover-device-classes); `broadcast_type` - rarely needs overriding). `node`/`key` can be left as empty strings instead, in which case a random identity is auto-generated and stored on the board's own flash on first boot - not recommended, see step 4.
-6. **Flash** `somfy-io-bridge.yaml` via the ESPHome app - open the app, find this file's card, and click **Install**:
+7. **Flash** `somfy-io-bridge.yaml` via the ESPHome app - open the app, find this file's card, and click **Install**:
    - **First flash**: choose "Plug into this computer", connect the board via USB, and pick the serial port when your browser prompts for it (only works from a browser tab open on the machine physically connected to the board).
    - **Every flash after that** (updates): choose "Wirelessly" instead - no USB needed, once the board is already on your Wi-Fi.
    - After a successful first flash, the board announces itself to Home Assistant automatically - go to Settings → Devices & Services, an "ESPHome" discovery card should appear; click **Configure** and enter the `io_bridge_api_key` value from `secrets.yaml` the one time it's needed.
-7. **Pair each cover to its motor** (see below).
-8. **Test**: Open/Close/Stop from the cover's card in Home Assistant. The mode `select` defaults to `Position`, which supports real percentage targets - see [Modes](#modes).
+8. **Pair each cover to its motor** (see below).
+9. **Test**: Open/Close/Stop from the cover's card in Home Assistant. The mode `select` defaults to `Position`, which supports real percentage targets - see [Modes](#modes).
 
 ## Pairing (and unpairing) a cover to its motor
 

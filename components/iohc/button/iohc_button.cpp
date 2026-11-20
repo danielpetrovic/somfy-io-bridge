@@ -17,7 +17,7 @@ void IOHCPairButton::press_action() {
                       : type_ == IOHC::RemoteButton::StopIdentify  ? "Stop Identify"
                       : type_ == IOHC::RemoteButton::SetMy         ? "Set My"
                                                                     : "Prog (2W)";
-  ESP_LOGI(TAG, "%s pressed - transmitting %s", this->get_name().c_str(), name);
+  ESP_LOGI(TAG, "%s pressed - transmitting %s", LOG_STR_ARG(this->get_log_name()), name);
   // My and Prog2W both need cover-level handling, unlike every other button
   // type here which just fires the 1W radio command directly - see
   // IOHCCover::press_my() / press_prog2w(). Prog (1W) resolves to Add or
@@ -32,7 +32,7 @@ void IOHCPairButton::press_action() {
   }
 }
 
-void IOHCPairButton::dump_config() { ESP_LOGCONFIG(TAG, "Somfy IOHC Pair Button '%s'", this->get_name().c_str()); }
+void IOHCPairButton::dump_config() { ESP_LOGCONFIG(TAG, "Somfy IOHC Pair Button '%s'", LOG_STR_ARG(this->get_log_name())); }
 
 }  // namespace iohc
 }  // namespace esphome

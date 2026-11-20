@@ -19,9 +19,13 @@
 esphome:
   name: somfy-io-bridge
   friendly_name: Somfy IO Bridge
+  # ESPHome 2026.11 made `relation` mandatory for every entry under `devices:`
+  # (see below). Older ESPHome rejects that option, so this fails early with a
+  # clear message instead of a confusing validation error.
+  min_version: 2026.11.0
   project:
     name: "danielpetrovic.Somfy IO Bridge"
-    version: "1.0.1"
+    version: "1.0.2"
   # The vendored radio stack talks to the SX1276 directly via Arduino's SPI
   # library, and the Phase 2 pairing/command layer persists bonded remote
   # identities via Arduino's Preferences (NVS) library. Neither gets picked
@@ -68,45 +72,59 @@ esphome:
     - id: bedroom_left_shutter_io_device
       name: "Bedroom Left Shutter"
       area_id: bedroom_area
+      relation: via
     - id: bedroom_middle_shutter_io_device
       name: "Bedroom Middle Shutter"
       area_id: bedroom_area
+      relation: via
     - id: bedroom_right_shutter_io_device
       name: "Bedroom Right Shutter"
       area_id: bedroom_area
+      relation: via
     - id: gameroom_left_shutter_io_device
       name: "Gameroom Left Shutter"
       area_id: gameroom_area
+      relation: via
     - id: gameroom_right_shutter_io_device
       name: "Gameroom Right Shutter"
       area_id: gameroom_area
+      relation: via
     - id: garden_shutter_io_device
       name: "Garden Shutter"
       area_id: garden_area
+      relation: via
     - id: gym_shutter_io_device
       name: "Gym Shutter"
       area_id: gym_area
+      relation: via
     - id: hallway_shutter_io_device
       name: "Hallway Shutter"
       area_id: hallway_area
+      relation: via
     - id: kitchen_shutter_io_device
       name: "Kitchen Shutter"
       area_id: kitchen_area
+      relation: via
     - id: living_room_shutter_io_device
       name: "Living Room Shutter"
       area_id: living_room_area
+      relation: via
     - id: office_shutter_io_device
       name: "Office Shutter"
       area_id: office_area
+      relation: via
     - id: roof_terrace_shutter_io_device
       name: "Roof Terrace Shutter"
       area_id: roof_terrace_area
+      relation: via
     - id: shed_alleyway_shutter_io_device
       name: "Shed Alleyway Shutter"
       area_id: shed_area
+      relation: via
     - id: shed_garden_shutter_io_device
       name: "Shed Garden Shutter"
       area_id: shed_area
+      relation: via
   # Applies the persisted Display Brightness/Page Interval globals (see
   # globals: below) to the real hardware - the YAML defaults on display:/
   # interval: only apply on a fresh flash, they don't get re-read after
