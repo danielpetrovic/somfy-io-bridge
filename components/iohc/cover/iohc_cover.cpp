@@ -149,8 +149,7 @@ void IOHCCover::on_status_heard(float closure_percent, bool position_valid, uint
     return;
   }
   uint32_t travel_ms = std::max(travel_time_open_, travel_time_close_) * 1000UL;
-  uint32_t last_cmd = remote_.last_cmd_ms();
-  if (last_cmd != 0 && (now_ms() - last_cmd) < travel_ms + ADOPT_QUIET_MS) {
+  if (last_cmd != 0 && (now - last_cmd) < travel_ms + ADOPT_QUIET_MS) {
     return;
   }
   float real_open_raw = 100.0f - closure_percent;  // motor space, same as the tracker
