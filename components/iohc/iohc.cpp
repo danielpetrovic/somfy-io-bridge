@@ -88,10 +88,8 @@ void IOHCComponent::set_bonding_hop_wanted(bool wanted) {
 bool IOHCComponent::on_receive(IOHC::iohcPacket *packet) {
   this->packets_received_++;
 
-  // Diagnostic-only: while off, this bridge behaves like a real Situo (only
-  // transmits, never continuously decodes received traffic) - see
-  // set_passive_decode_wanted()'s comment in iohc.h for why this defaults
-  // off (2026-07-13 incident).
+  // While off, this bridge only transmits and never decodes received traffic
+  // (see set_passive_decode_wanted()'s comment in iohc.h).
   if (!passive_decode_wanted_) {
     return false;
   }
@@ -104,6 +102,65 @@ bool IOHCComponent::on_receive(IOHC::iohcPacket *packet) {
   // attempt's specific target motor (see IOHCController2W::handle_frame()),
   // so this is a cheap no-op in the common case.
   controller2w_.handle_frame(packet);
+
+  const auto &header = packet->payload.packet.header;
+  const uint8_t *source = header.source;
+
+  // RSSI of every frame a cover's own motor sent (1W or 2W, decoded or not).
+  for (auto *cover : this->status_covers_) {
+    if (cover->motor_matches(source)) {
+      cover->update_last_rssi(packet->rssi);
+    }
+  }
+
+  // Passive 2W status: a 2W (Protocol bit clear) cmd 0x04 "Private Command
+  // Answer", sent by a motor to whichever controller polled it. Layout in
+  // iohcPacket.h (_p0x04_14): status, one unknown byte, Main (position echo,
+  // raw/512 = closure %, 0 open to 100 closed), four unmapped bytes, then the
+  // 3-byte address of the controller that last commanded the motor. After a
+  // 1W command of ours that address is our own cover's remote address, so the
+  // answer can be matched without knowing the motor's address. Needs the
+  // whole struct in the frame (buffer_length >= 20).
+  //
+  // Nothing from this path writes into a cover's own position or state: the
+  // RX pipeline has no integrity check, so a garbled frame could otherwise
+  // corrupt the entity used for control. It only reaches the standalone
+  // sensors and the log (see IOHCCover::on_status_heard()).
+  if (!header.CtrlByte1.asStruct.Protocol && header.cmd == 0x04 && packet->buffer_length >= 20 &&
+      packet->buffer_length <= MAX_FRAME_LEN) {
+    const auto &answer = packet->payload.packet.msg.p0x04_14;
+    IOHCCover *match = nullptr;
+    bool commander_is_ours = false;
+    for (auto *cover : this->status_covers_) {
+      if (cover->commander_matches(answer.commanding_controller)) {
+        match = cover;
+        commander_is_ours = true;
+        break;
+      }
+    }
+    if (match == nullptr) {
+      for (auto *cover : this->status_covers_) {
+        if (cover->motor_matches(source)) {
+          match = cover;
+          break;
+        }
+      }
+    }
+    if (match == nullptr) {
+      ESP_LOGD(TAG, "Status answer from %02X%02X%02X (commander %02X%02X%02X) matches no cover", source[0], source[1],
+               source[2], answer.commanding_controller[0], answer.commanding_controller[1],
+               answer.commanding_controller[2]);
+    } else {
+      uint16_t raw = (static_cast<uint16_t>(answer.main[0]) << 8) | answer.main[1];
+      // Only 0x0000-0xC800 is a closure percentage. Main echoes the last
+      // command's parameter: after Stop (0xD200), Vent/Favorite (0xD800),
+      // Secured target (0xD100) or Default (0xD300) it is not a position, and
+      // dividing it would show a plausible but wrong 100% (seen 2026-07-12).
+      bool position_valid = raw <= 0xC800;
+      match->on_status_heard(position_valid ? raw / 512.0f : 0.0f, position_valid, answer.status, commander_is_ours,
+                             packet->rssi, static_cast<float>(packet->afc));
+    }
+  }
 
   return true;
 }

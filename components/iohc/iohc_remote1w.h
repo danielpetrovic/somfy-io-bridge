@@ -183,6 +183,14 @@ namespace IOHC {
         bool is_paired() const { return paired_; }
         BlindPosition &position_tracker() { return position_tracker_; }
 
+        // This virtual remote's own address. A 2W motor echoes the address of
+        // whichever remote commanded it last in its status answer ("Commander"),
+        // so after one of our commands that field equals this address.
+        const address &node() const { return node_; }
+        // Time of the last cmd() call (any button), in ms since boot; 0 until
+        // the first one. Only used to log how long a status answer took.
+        uint32_t last_cmd_ms() const { return last_cmd_ms_; }
+
         // percent is only used for RemoteButton::Position (0-100).
         void cmd(RemoteButton button, int percent = -1);
 
@@ -199,6 +207,7 @@ namespace IOHC {
         address node_{};      // our virtual remote's own address (Source)
         uint8_t key_[16]{};    // shared session key, established at Add time
         uint16_t sequence_{1};
+        uint32_t last_cmd_ms_{0};
         uint8_t type_{0};
         uint8_t manufacturer_{2}; // 2 = Somfy, matches upstream's own default
         bool paired_{false};

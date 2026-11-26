@@ -223,3 +223,31 @@ number:
     cover_id: ${cover_id}
     type: travel_time_close
     entity_category: config
+
+sensor:
+  # Position as the motor itself last reported it, in Overkiz's own "Target
+  # closure" convention (0 = open, 100 = closed, the opposite of this cover's
+  # position). It comes from the status answer a motor sends when another
+  # controller (TaHoma) polls it, which this bridge overhears; the answer's
+  # "Commander" field is the address of the remote that commanded the motor
+  # last, so after a command of ours it matches this cover without needing
+  # motor_address. Needs "Debug Passive Decode (2W)" on. Unavailable until
+  # the first answer is heard. A standalone sensor on purpose: it never
+  # touches the cover entity, since an overheard frame has no integrity check.
+  - platform: iohc
+    id: ${cover_id}_target_closure
+    name: "Target Closure"
+    device_id: ${cover_id}_device
+    cover_id: ${cover_id}
+    type: target_closure
+    entity_category: diagnostic
+  # This bridge's own signal strength for the last frame heard from this
+  # cover's motor, any frame, 1W or 2W. Not Overkiz's "RSSI Level", which is
+  # TaHoma's radio. Requires motor_address.
+  - platform: iohc
+    id: ${cover_id}_last_rssi
+    name: "Last RSSI"
+    device_id: ${cover_id}_device
+    cover_id: ${cover_id}
+    type: rssi
+    entity_category: diagnostic

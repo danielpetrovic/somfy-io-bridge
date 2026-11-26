@@ -1,8 +1,10 @@
 #include "iohc_cover.h"
 #include "esphome/core/log.h"
 #include "../iohcCryptoHelpers.h"
+#include "esp_timer.h"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <functional>
 
 namespace esphome {
@@ -60,6 +62,11 @@ void IOHCCover::setup() {
     remote_.position_tracker().setPosition(raw_position * 100.0f);
   }
 
+  parent_->register_status_cover(this);
+
+  // Drop the value an earlier version of this component persisted under this
+  // key (July 2026): it is stale and nothing reads it any more.
+  cover_prefs_.remove("target_closure");
 }
 
 void IOHCCover::set_motor_address(const std::string &motor_address_hex) {
@@ -67,6 +74,51 @@ void IOHCCover::set_motor_address(const std::string &motor_address_hex) {
     return;
   hexStringToBytes(motor_address_hex, motor_address_);
   has_motor_address_ = true;
+}
+
+bool IOHCCover::commander_matches(const uint8_t *commander) const {
+  return memcmp(remote_.node(), commander, sizeof(IOHC::address)) == 0;
+}
+
+bool IOHCCover::motor_matches(const uint8_t *source) const {
+  return has_motor_address_ && memcmp(motor_address_, source, sizeof(IOHC::address)) == 0;
+}
+
+void IOHCCover::on_status_heard(float closure_percent, bool position_valid, uint8_t status, bool commander_is_ours,
+                                float rssi_dbm, float afc_hz) {
+  uint32_t last_cmd = remote_.last_cmd_ms();
+  uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+  char age[32];
+  if (last_cmd == 0) {
+    snprintf(age, sizeof(age), "no command since boot");
+  } else {
+    snprintf(age, sizeof(age), "%.1f s after our last command", (now - last_cmd) / 1000.0f);
+  }
+  if (position_valid) {
+    ESP_LOGI(TAG, "%s: status heard, closure=%.0f%% status=0x%02X commander=%s, %.1f dBm, afc %+.0f Hz, %s",
+             LOG_STR_ARG(this->get_log_name()), closure_percent, status, commander_is_ours ? "us" : "other",
+             rssi_dbm, afc_hz, age);
+  } else {
+    ESP_LOGI(TAG, "%s: status heard, no position (last command was not a move) status=0x%02X commander=%s, "
+                  "%.1f dBm, afc %+.0f Hz, %s",
+             LOG_STR_ARG(this->get_log_name()), status, commander_is_ours ? "us" : "other", rssi_dbm, afc_hz, age);
+  }
+  update_last_rssi(rssi_dbm);
+  if (!position_valid) {
+    return;
+  }
+  closure_percent = std::clamp(closure_percent, 0.0f, 100.0f);
+  // Not persisted: after a restart the sensor stays unavailable until a real
+  // answer is heard, so an old value is never shown as current.
+  if (target_closure_sensor_ != nullptr) {
+    target_closure_sensor_->publish_state(closure_percent);
+  }
+}
+
+void IOHCCover::update_last_rssi(float rssi_dbm) {
+  if (last_rssi_sensor_ != nullptr) {
+    last_rssi_sensor_->publish_state(rssi_dbm);
+  }
 }
 
 void IOHCCover::update_real_position_authoritative(float closure_percent) {

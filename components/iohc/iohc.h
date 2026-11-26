@@ -16,6 +16,7 @@
 #include "iohcRadio.h"
 #include "iohc_controller2w.h"
 #include <string>
+#include <vector>
 
 namespace esphome {
 namespace iohc {
@@ -30,6 +31,13 @@ class IOHCComponent : public Component {
   float get_setup_priority() const override { return setup_priority::HARDWARE; }
 
   bool on_receive(IOHC::iohcPacket *packet);
+
+  // Passive 2W status: every cover registers itself in setup() so that a
+  // motor's status answer (cmd 0x04), overheard while another controller such
+  // as TaHoma polls it, can be matched to a cover by its "Commander" field
+  // (our own remote address) or by the motor address. Nothing is decoded
+  // unless "Debug Passive Decode (2W)" is on.
+  void register_status_cover(IOHCCover *cover) { this->status_covers_.push_back(cover); }
 
   // This bridge's own 2W bonding/control (Phase 3) - one shared instance for
   // the whole bridge, see iohc_controller2w.h. Distinct from the passive
@@ -83,17 +91,14 @@ class IOHCComponent : public Component {
   void set_manual_hop_wanted(bool wanted);
   void set_bonding_hop_wanted(bool wanted);
 
-  // Diagnostic toggle (2026-07-13 incident): when false, on_receive() skips
-  // ALL passive processing of received frames (controller2w's own bonding/
-  // key-sniffer frame handling) right after the packet counter - the bridge
-  // still transmits 1W commands normally, but stops continuously decoding
-  // every frame on the channel the way it normally does. Real Situo remotes
-  // don't do this at all. Added to test whether this bridge's own
-  // continuous RX/decode load - not present on a Situo - is what's
-  // colliding with TaHoma's own concurrent polling of motors. Defaults
-  // false: with only one real user of this bridge right now, stability
-  // takes priority - turn on explicitly to get 2W bonding/key-sniff
-  // processing back.
+  // When false, on_receive() skips ALL processing of received frames
+  // (passive 2W status for the standalone cover sensors, controller2w's own
+  // bonding/key-sniffer frame handling) right after the packet counter - the
+  // bridge still transmits 1W commands normally. It was added on 2026-07-13
+  // on the suspicion that continuous decoding collided with TaHoma's polling;
+  // that was wrong (the real cause was a loop in this bridge that flooded the
+  // IO network, fixed in a later version), so decoding is not a risk. It
+  // stays off by default only until the passive status path is proven.
   void set_passive_decode_wanted(bool wanted) { passive_decode_wanted_ = wanted; }
   bool passive_decode_wanted() const { return passive_decode_wanted_; }
 
@@ -112,6 +117,7 @@ class IOHCComponent : public Component {
   // Total received frame count, any source - only used for the debug log
   // line in on_receive() (frame numbering).
   uint32_t packets_received_{0};
+  std::vector<IOHCCover *> status_covers_;
 };
 
 }  // namespace iohc

@@ -123,6 +123,7 @@ namespace IOHC {
     }
 
     void IOHCRemote1W::cmd(RemoteButton button, int percent) {
+        last_cmd_ms_ = static_cast<uint32_t>(esp_timer_get_time() / 1000);
         position_tracker_.update();
 
         switch (button) {

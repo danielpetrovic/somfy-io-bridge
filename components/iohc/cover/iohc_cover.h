@@ -2,6 +2,7 @@
 
 #include "esphome/core/component.h"
 #include "esphome/components/cover/cover.h"
+#include "esphome/components/sensor/sensor.h"
 #include "../iohc.h"
 #include "../iohc_remote1w.h"
 #include <Preferences.h>
@@ -134,6 +135,29 @@ class IOHCCover : public cover::Cover, public Component {
   // entity" rule, which this deliberately does not fall under.
   void update_real_position_authoritative(float closure_percent);
 
+  // Passive 2W status (cmd 0x04 answer of a motor, overheard while another
+  // controller such as TaHoma polls it; see IOHCComponent::on_receive()).
+  // Nothing here can reach this cover's own position/state: a passively
+  // decoded frame has no integrity check, so it only feeds the two standalone
+  // sensors below and the log, never the entity used for control.
+  //
+  // commander_matches(): the frame's "Commander" field is this cover's own
+  // virtual remote address, i.e. our bridge sent the last command the motor
+  // obeyed. motor_matches(): the frame was sent by this cover's configured
+  // motor_address (needs motor_address, optional).
+  bool commander_matches(const uint8_t *commander) const;
+  bool motor_matches(const uint8_t *source) const;
+  // closure_percent is 0 = open, 100 = closed (the same scale as Overkiz's
+  // "Target closure"); position_valid is false when the Main field echoes a
+  // non-position command (stop, vent, ...).
+  void on_status_heard(float closure_percent, bool position_valid, uint8_t status, bool commander_is_ours,
+                       float rssi_dbm, float afc_hz);
+  // Any frame sent by this cover's motor_address, decoded or not. RSSI is a
+  // property of the reception, so a misdecoded payload cannot corrupt it.
+  void update_last_rssi(float rssi_dbm);
+  void set_target_closure_sensor(sensor::Sensor *s) { target_closure_sensor_ = s; }
+  void set_last_rssi_sensor(sensor::Sensor *s) { last_rssi_sensor_ = s; }
+
  protected:
   void control(const cover::CoverCall &call) override;
 
@@ -170,6 +194,8 @@ class IOHCCover : public cover::Cover, public Component {
   std::string nvs_key_;
   IOHC::address motor_address_{};
   bool has_motor_address_{false};
+  sensor::Sensor *target_closure_sensor_{nullptr};
+  sensor::Sensor *last_rssi_sensor_{nullptr};
 
   Mode mode_{Mode::POSITION};
   // Explicitly global-scoped: inside esphome::iohc, unqualified "Preferences"
