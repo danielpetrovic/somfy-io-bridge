@@ -157,6 +157,10 @@ class IOHCCover : public cover::Cover, public Component {
   void update_last_rssi(float rssi_dbm);
   void set_target_closure_sensor(sensor::Sensor *s) { target_closure_sensor_ = s; }
   void set_last_rssi_sensor(sensor::Sensor *s) { last_rssi_sensor_ = s; }
+  // Counters for the confirm-and-resend below (since boot): commands that had
+  // to be sent again, and commands still unconfirmed after the last resend.
+  void set_resends_sensor(sensor::Sensor *s) { resends_sensor_ = s; }
+  void set_failed_sensor(sensor::Sensor *s) { failed_sensor_ = s; }
 
  protected:
   void control(const cover::CoverCall &call) override;
@@ -196,6 +200,29 @@ class IOHCCover : public cover::Cover, public Component {
   bool has_motor_address_{false};
   sensor::Sensor *target_closure_sensor_{nullptr};
   sensor::Sensor *last_rssi_sensor_{nullptr};
+  sensor::Sensor *resends_sensor_{nullptr};
+  sensor::Sensor *failed_sensor_{nullptr};
+
+  // Confirm-and-resend (switch "Confirm And Resend (2W)"). A 1W command gets
+  // no reply, but the motor's status answer, overheard when TaHoma polls it
+  // about 35 s later, carries its position: closure = 100 - the open percent
+  // we sent (Open 0, Close 100, Position p -> 100 - p). After an Open, Close
+  // or Position in Mode::POSITION the cover waits for an answer that matches;
+  // without one it sends the same command again (see check_confirmation_()).
+  void arm_confirmation_(IOHC::RemoteButton button, int percent, float expected_closure);
+  void check_confirmation_();
+  // Takes the motor's real position over as this cover's state (see
+  // on_status_heard() for when that is allowed).
+  void adopt_real_position_(float closure_percent);
+  bool confirm_pending_{false};
+  IOHC::RemoteButton pending_button_{IOHC::RemoteButton::Open};
+  int pending_percent_{-1};
+  float pending_expected_closure_{0.0f};
+  uint32_t pending_first_ms_{0};
+  uint32_t pending_sent_ms_{0};
+  uint8_t pending_resends_{0};
+  uint32_t resend_count_{0};
+  uint32_t failed_count_{0};
 
   Mode mode_{Mode::POSITION};
   // Explicitly global-scoped: inside esphome::iohc, unqualified "Preferences"

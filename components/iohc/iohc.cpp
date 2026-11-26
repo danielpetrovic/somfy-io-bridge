@@ -2,6 +2,7 @@
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 #include "cover/iohc_cover.h"
+#include "esp_timer.h"
 
 namespace esphome {
 namespace iohc {
@@ -88,14 +89,16 @@ void IOHCComponent::set_bonding_hop_wanted(bool wanted) {
 bool IOHCComponent::on_receive(IOHC::iohcPacket *packet) {
   this->packets_received_++;
 
-  // While off, this bridge only transmits and never decodes received traffic
-  // (see set_passive_decode_wanted()'s comment in iohc.h).
-  if (!passive_decode_wanted_) {
+  // While both switches are off, this bridge only transmits and never decodes
+  // received traffic (see set_passive_decode_wanted() in iohc.h).
+  if (!passive_decode_wanted_ && !confirm_resend_wanted_) {
     return false;
   }
 
-  ESP_LOGI(TAG, "Frame #%lu received, length=%u, rssi=%.1f dBm", this->packets_received_, packet->buffer_length,
-           packet->rssi);
+  if (passive_decode_wanted_) {
+    ESP_LOGI(TAG, "Frame #%lu received, length=%u, rssi=%.1f dBm", this->packets_received_, packet->buffer_length,
+             packet->rssi);
+  }
 
   // This bridge's own 2W bonding (Phase 3) - only ever consumes a frame
   // while a bonding attempt is armed AND the frame's source matches that
@@ -129,6 +132,7 @@ bool IOHCComponent::on_receive(IOHC::iohcPacket *packet) {
   if (!header.CtrlByte1.asStruct.Protocol && header.cmd == 0x04 && packet->buffer_length >= 20 &&
       packet->buffer_length <= MAX_FRAME_LEN) {
     const auto &answer = packet->payload.packet.msg.p0x04_14;
+    this->last_status_ms_ = static_cast<uint32_t>(esp_timer_get_time() / 1000);
     IOHCCover *match = nullptr;
     bool commander_is_ours = false;
     for (auto *cover : this->status_covers_) {
@@ -163,6 +167,14 @@ bool IOHCComponent::on_receive(IOHC::iohcPacket *packet) {
   }
 
   return true;
+}
+
+bool IOHCComponent::status_feedback_available() const {
+  if (this->last_status_ms_ == 0) {
+    return false;
+  }
+  uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+  return (now - this->last_status_ms_) < 6UL * 60UL * 60UL * 1000UL;
 }
 
 void IOHCComponent::dump_config() {

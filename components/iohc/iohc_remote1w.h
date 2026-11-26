@@ -193,6 +193,9 @@ namespace IOHC {
 
         // percent is only used for RemoteButton::Position (0-100).
         void cmd(RemoteButton button, int percent = -1);
+        // Sends the same command again (Open, Close or Position only) without
+        // touching the position estimate. Used by the cover's confirm-and-resend.
+        void cmd_resend(RemoteButton button, int percent = -1);
 
     private:
         void forge_packet(iohcPacket *packet);
@@ -208,6 +211,7 @@ namespace IOHC {
         uint8_t key_[16]{};    // shared session key, established at Add time
         uint16_t sequence_{1};
         uint32_t last_cmd_ms_{0};
+        bool suppress_tracker_{false};
         uint8_t type_{0};
         uint8_t manufacturer_{2}; // 2 = Somfy, matches upstream's own default
         bool paired_{false};

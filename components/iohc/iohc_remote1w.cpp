@@ -122,6 +122,14 @@ namespace IOHC {
         packet->lock = false;
     }
 
+    void IOHCRemote1W::cmd_resend(RemoteButton button, int percent) {
+        // Same frames and a fresh sequence number, as if the button were pressed again, but the
+        // position estimate (BlindPosition) is left alone: it already ran for the first send.
+        suppress_tracker_ = true;
+        cmd(button, percent);
+        suppress_tracker_ = false;
+    }
+
     void IOHCRemote1W::cmd(RemoteButton button, int percent) {
         last_cmd_ms_ = static_cast<uint32_t>(esp_timer_get_time() / 1000);
         position_tracker_.update();
@@ -382,13 +390,13 @@ namespace IOHC {
                     case RemoteButton::Open:
                         packet->payload.packet.msg.p0x00_14.main[0] = 0x00;
                         packet->payload.packet.msg.p0x00_14.main[1] = 0x00;
-                        position_tracker_.startOpening();
+                        if (!suppress_tracker_) position_tracker_.startOpening();
                         companion_fp1 = 0x00;
                         break;
                     case RemoteButton::Close:
                         packet->payload.packet.msg.p0x00_14.main[0] = 0xc8;
                         packet->payload.packet.msg.p0x00_14.main[1] = 0x00;
-                        position_tracker_.startClosing();
+                        if (!suppress_tracker_) position_tracker_.startClosing();
                         companion_fp1 = 0x00;
                         break;
                     case RemoteButton::Stop:
@@ -408,7 +416,9 @@ namespace IOHC {
                         packet->payload.packet.msg.p0x00_14.main[0] = val;
                         packet->payload.packet.msg.p0x00_14.main[1] = 0x00;
                         float current = position_tracker_.getPosition();
-                        if (p > current + 0.5f)
+                        if (suppress_tracker_) {
+                            // A resend must not restart the travel estimate.
+                        } else if (p > current + 0.5f)
                             position_tracker_.startOpening();
                         else if (p < current - 0.5f)
                             position_tracker_.startClosing();

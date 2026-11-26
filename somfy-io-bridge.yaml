@@ -443,16 +443,40 @@ switch:
           format: "Debug Channel Hop (2W) turned OFF - RX back to CH2 only"
           level: WARN
       - lambda: id(iohc_hub).set_manual_hop_wanted(false);
-  # Diagnostic (2026-07-13): stays OFF by default - this bridge does NOT
-  # continuously decode every received frame (2W bonding-attempt handling,
-  # key sniffer) out of the box, only transmits 1W commands, closer to how a
-  # real Situo remote behaves. Turn ON explicitly to opt into that
-  # processing - added to test whether this bridge's own continuous RX load,
-  # which a Situo never has, is what collided with TaHoma's own concurrent
-  # polling in the 2026-07-13 incident. The Target Closure/Last RSSI sensors
-  # this switch used to also gate were removed entirely (not just disabled)
-  # rather than half-ship unstable diagnostic sensors ahead of real 2W
-  # control - see the plan file's Phase 3 section.
+  # Confirm And Resend (2W). A 1W command gets no reply, but the motor's status
+  # answer (overheard when TaHoma polls it, about 35 s after the command)
+  # carries its real position. With this on, every Open/Close/Position waits
+  # for a status answer that matches the target; without one after 60 s plus
+  # the travel time the same command is sent again, at most twice, and a
+  # command still unconfirmed after that is counted in the cover's "Failed
+  # Commands" sensor and logged as a warning. The cover also takes over the
+  # real position when an answer disagrees with its estimate (only while idle
+  # and long after our last command). Nothing is resent unless a status answer
+  # was heard within the last 6 hours (TaHoma gone), and the state is kept
+  # across reboots. Needs a controller such as TaHoma that polls the motors.
+  - platform: template
+    name: "Confirm And Resend (2W)"
+    icon: mdi:send-check
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+    turn_on_action:
+      - logger.log:
+          format: "Confirm And Resend (2W) turned ON"
+          level: INFO
+      - lambda: id(iohc_hub).set_confirm_resend_wanted(true);
+    turn_off_action:
+      - logger.log:
+          format: "Confirm And Resend (2W) turned OFF"
+          level: INFO
+      - lambda: id(iohc_hub).set_confirm_resend_wanted(false);
+  # Diagnostic: stays OFF by default. Turns on the INFO log line for every
+  # received frame (and the key-sniffer/bonding frame handling) on top of the
+  # decoding that Confirm And Resend already switches on by itself. The
+  # per-cover Target Closure and Last RSSI sensors fill whenever either switch
+  # is on. (The 2026-07-13 suspicion that decoding collided with TaHoma's
+  # polling was wrong: the real cause was a loop in this bridge that flooded
+  # the IO network, fixed in a later version.)
   - platform: template
     name: "Debug Passive Decode (2W)"
     icon: mdi:radio-tower

@@ -37,6 +37,7 @@ from esphome.const import (
     DEVICE_CLASS_SIGNAL_STRENGTH,
     ENTITY_CATEGORY_DIAGNOSTIC,
     STATE_CLASS_MEASUREMENT,
+    STATE_CLASS_TOTAL_INCREASING,
     UNIT_DECIBEL_MILLIWATT,
     UNIT_PERCENT,
 )
@@ -50,6 +51,8 @@ CONF_COVER_ID = "cover_id"
 
 TYPE_TARGET_CLOSURE = "target_closure"
 TYPE_RSSI = "rssi"
+TYPE_RESENDS = "resends"
+TYPE_FAILED = "failed_commands"
 
 # expire_after: neither sensor is pushed on a fixed schedule - both only
 # update when a frame happens to be overheard (from an external box, or not
@@ -69,6 +72,19 @@ SENSOR_SCHEMAS = {
         accuracy_decimals=0,
         state_class=STATE_CLASS_MEASUREMENT,
     ).extend({cv.Optional(CONF_EXPIRE_AFTER, default=_EXPIRE_AFTER_DEFAULT): cv.All(cv.positive_time_period_milliseconds)}),
+    # Commands that had to be sent again / were still unconfirmed after the
+    # last resend, counted since boot (confirm-and-resend, see iohc_cover.h).
+    # No expire_after: a counter that sits still is not stale.
+    TYPE_RESENDS: sensor.sensor_schema(
+        accuracy_decimals=0,
+        state_class=STATE_CLASS_TOTAL_INCREASING,
+        entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+    ),
+    TYPE_FAILED: sensor.sensor_schema(
+        accuracy_decimals=0,
+        state_class=STATE_CLASS_TOTAL_INCREASING,
+        entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+    ),
     TYPE_RSSI: sensor.sensor_schema(
         unit_of_measurement=UNIT_DECIBEL_MILLIWATT,
         accuracy_decimals=1,
@@ -97,5 +113,9 @@ async def to_code(config):
     cover_var = await cg.get_variable(config[CONF_COVER_ID])
     if config[CONF_TYPE] == TYPE_RSSI:
         cg.add(cover_var.set_last_rssi_sensor(var))
+    elif config[CONF_TYPE] == TYPE_RESENDS:
+        cg.add(cover_var.set_resends_sensor(var))
+    elif config[CONF_TYPE] == TYPE_FAILED:
+        cg.add(cover_var.set_failed_sensor(var))
     else:
         cg.add(cover_var.set_target_closure_sensor(var))

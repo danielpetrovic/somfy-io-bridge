@@ -12,6 +12,16 @@ namespace iohc {
 
 static const char *const TAG = "iohc.cover";
 
+// Confirm-and-resend tuning. A status answer is heard about 35 s after a
+// command (TaHoma polls the motor), so the window is 60 s plus the travel time.
+static constexpr float CONFIRM_TOLERANCE = 3.0f;          // percent
+static constexpr uint32_t CONFIRM_WINDOW_MS = 60000;      // plus the travel time
+static constexpr uint8_t MAX_RESENDS = 2;
+static constexpr float ADOPT_TOLERANCE = 3.0f;            // percent
+static constexpr uint32_t ADOPT_QUIET_MS = 30000;         // after the travel time since our last command
+
+static uint32_t now_ms() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
+
 // ESP32 NVS namespace names are capped at 15 chars - hash the nvs_key down
 // to a short, fixed, deterministic one, same approach as iohc_remote1w.cpp.
 static std::string cover_nvs_namespace_for(const std::string &nvs_key) {
@@ -113,6 +123,107 @@ void IOHCCover::on_status_heard(float closure_percent, bool position_valid, uint
   if (target_closure_sensor_ != nullptr) {
     target_closure_sensor_->publish_state(closure_percent);
   }
+
+  if (!parent_->confirm_resend_wanted() || mode_ != Mode::POSITION) {
+    return;
+  }
+
+  // Confirmation: the motor is where the last command sent it. The cover
+  // already shows that target, so nothing else to do.
+  if (confirm_pending_ && std::fabs(closure_percent - pending_expected_closure_) <= CONFIRM_TOLERANCE) {
+    ESP_LOGI(TAG, "%s: command confirmed, motor at %.0f%% closed, %.1f s after the first send, %u resend(s)",
+             LOG_STR_ARG(this->get_log_name()), closure_percent, (now_ms() - pending_first_ms_) / 1000.0f,
+             static_cast<unsigned>(pending_resends_));
+    confirm_pending_ = false;
+    return;
+  }
+
+  // Adopting the real position. Only here is the heard position allowed to
+  // change this cover: the hub matched the frame on a 24 bit address (the
+  // commander or the motor address), which a garbled frame will not hit by
+  // chance. Not while a command is waiting for its confirmation (a resend is
+  // pending), not while the cover is moving, and not until the motor has
+  // surely stopped after our last command: an answer from mid-travel would
+  // pull the state backwards and might be the last one heard.
+  if (confirm_pending_ || this->current_operation != cover::COVER_OPERATION_IDLE) {
+    return;
+  }
+  uint32_t travel_ms = std::max(travel_time_open_, travel_time_close_) * 1000UL;
+  uint32_t last_cmd = remote_.last_cmd_ms();
+  if (last_cmd != 0 && (now_ms() - last_cmd) < travel_ms + ADOPT_QUIET_MS) {
+    return;
+  }
+  float real_open_raw = 100.0f - closure_percent;  // motor space, same as the tracker
+  if (std::fabs(real_open_raw - remote_.position_tracker().getPosition()) > ADOPT_TOLERANCE) {
+    adopt_real_position_(closure_percent);
+  }
+}
+
+void IOHCCover::adopt_real_position_(float closure_percent) {
+  float real_open_raw = 100.0f - closure_percent;
+  ESP_LOGI(TAG, "%s: taking over the real position %.0f%% open (estimate was %.0f%%)",
+           LOG_STR_ARG(this->get_log_name()), real_open_raw, remote_.position_tracker().getPosition());
+  remote_.position_tracker().setPosition(real_open_raw);
+  remote_.position_tracker().stop();
+  target_position_ = -1.0f;
+  this->position = invert_ ? (1.0f - real_open_raw / 100.0f) : (real_open_raw / 100.0f);
+  this->current_operation = cover::COVER_OPERATION_IDLE;
+  cover_prefs_.putFloat("position", this->position);
+  this->publish_state();
+}
+
+void IOHCCover::arm_confirmation_(IOHC::RemoteButton button, int percent, float expected_closure) {
+  if (!parent_->confirm_resend_wanted()) {
+    confirm_pending_ = false;
+    return;
+  }
+  confirm_pending_ = true;
+  pending_button_ = button;
+  pending_percent_ = percent;
+  pending_expected_closure_ = std::clamp(expected_closure, 0.0f, 100.0f);
+  pending_first_ms_ = pending_sent_ms_ = now_ms();
+  pending_resends_ = 0;
+}
+
+void IOHCCover::check_confirmation_() {
+  if (!confirm_pending_) {
+    return;
+  }
+  if (!parent_->confirm_resend_wanted()) {
+    confirm_pending_ = false;
+    return;
+  }
+  uint32_t now = now_ms();
+  uint32_t travel_ms = std::max(travel_time_open_, travel_time_close_) * 1000UL;
+  if ((now - pending_sent_ms_) < CONFIRM_WINDOW_MS + travel_ms) {
+    return;
+  }
+  if (!parent_->status_feedback_available()) {
+    ESP_LOGI(TAG, "%s: no motor status heard for 6 hours, so nothing confirms commands: not resending",
+             LOG_STR_ARG(this->get_log_name()));
+    confirm_pending_ = false;
+    return;
+  }
+  if (pending_resends_ >= MAX_RESENDS) {
+    failed_count_++;
+    if (failed_sensor_ != nullptr) {
+      failed_sensor_->publish_state(failed_count_);
+    }
+    ESP_LOGW(TAG, "%s: command not confirmed after %u resend(s), expected %.0f%% closed. Giving up.",
+             LOG_STR_ARG(this->get_log_name()), static_cast<unsigned>(pending_resends_), pending_expected_closure_);
+    confirm_pending_ = false;
+    return;
+  }
+  pending_resends_++;
+  resend_count_++;
+  if (resends_sensor_ != nullptr) {
+    resends_sensor_->publish_state(resend_count_);
+  }
+  ESP_LOGI(TAG, "%s: no matching status within %.0f s, sending the command again (resend %u of %u)",
+           LOG_STR_ARG(this->get_log_name()), (now - pending_sent_ms_) / 1000.0f,
+           static_cast<unsigned>(pending_resends_), static_cast<unsigned>(MAX_RESENDS));
+  remote_.cmd_resend(pending_button_, pending_percent_);
+  pending_sent_ms_ = now;
 }
 
 void IOHCCover::update_last_rssi(float rssi_dbm) {
@@ -182,6 +293,7 @@ void IOHCCover::apply_travel_times_() {
 }
 
 void IOHCCover::loop() {
+  this->check_confirmation_();
   if (mode_ != Mode::POSITION)
     return; // MY/TWO_WAY don't tick a time-based position estimate
 
@@ -309,6 +421,7 @@ void IOHCCover::control(const cover::CoverCall &call) {
   }
 
   if (call.get_stop()) {
+    confirm_pending_ = false;
     remote_.cmd(IOHC::RemoteButton::Stop);
     if (mode_ == Mode::MY) {
       this->position = 0.5f;
@@ -333,6 +446,7 @@ void IOHCCover::control(const cover::CoverCall &call) {
   int percent = static_cast<int>(lroundf(target * 100.0f));
 
   if (mode_ == Mode::MY) {
+    confirm_pending_ = false;
     // 3 discrete states, any intermediate request maps to the "My"/favorite
     // position. Unlike RTS (where My and Stop are genuinely the same
     // physical button), IO's real "My" is a distinct command (Vent,
@@ -368,21 +482,26 @@ void IOHCCover::control(const cover::CoverCall &call) {
   // directly. current_operation and the persisted "position" stay in HA
   // space (percent, unconverted) since both are user-facing.
   if (percent >= 100) {
-    remote_.cmd(invert_ ? IOHC::RemoteButton::Close : IOHC::RemoteButton::Open);
+    IOHC::RemoteButton sent = invert_ ? IOHC::RemoteButton::Close : IOHC::RemoteButton::Open;
+    remote_.cmd(sent);
     target_position_ = invert_ ? 0.0f : 100.0f;
     target_raw_opening_ = !invert_;
     this->current_operation = cover::COVER_OPERATION_OPENING;
+    arm_confirmation_(sent, -1, 100.0f - target_position_);
   } else if (percent <= 0) {
-    remote_.cmd(invert_ ? IOHC::RemoteButton::Open : IOHC::RemoteButton::Close);
+    IOHC::RemoteButton sent = invert_ ? IOHC::RemoteButton::Open : IOHC::RemoteButton::Close;
+    remote_.cmd(sent);
     target_position_ = invert_ ? 100.0f : 0.0f;
     target_raw_opening_ = invert_;
     this->current_operation = cover::COVER_OPERATION_CLOSING;
+    arm_confirmation_(sent, -1, 100.0f - target_position_);
   } else {
     float current_raw = remote_.position_tracker().getPosition();
     float current_ha = invert_ ? (100.0f - current_raw) : current_raw;
     int raw_percent = invert_ ? (100 - percent) : percent;
     remote_.cmd(IOHC::RemoteButton::Position, raw_percent);
     target_position_ = static_cast<float>(raw_percent);
+    arm_confirmation_(IOHC::RemoteButton::Position, raw_percent, 100.0f - target_position_);
     // Mirrors the same comparison iohc_remote1w.cpp's own Position case
     // uses internally to decide startOpening()/startClosing() on the
     // tracker (raw_percent vs the tracker's own pre-command raw

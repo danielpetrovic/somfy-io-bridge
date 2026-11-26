@@ -102,6 +102,16 @@ class IOHCComponent : public Component {
   void set_passive_decode_wanted(bool wanted) { passive_decode_wanted_ = wanted; }
   bool passive_decode_wanted() const { return passive_decode_wanted_; }
 
+  // Confirm-and-resend (see IOHCCover::arm_confirmation_()): while on, received
+  // frames are decoded even when the debug switch above is off, because the
+  // confirmation of a command is a motor's overheard status answer.
+  void set_confirm_resend_wanted(bool wanted) { confirm_resend_wanted_ = wanted; }
+  bool confirm_resend_wanted() const { return confirm_resend_wanted_; }
+  // True when a motor status answer was heard within the last 6 hours: some
+  // controller (TaHoma) polls the motors, so a command that stays
+  // unconfirmed means something. Without that, nothing is resent.
+  bool status_feedback_available() const;
+
  protected:
   void maybe_hop_();
   void hop_wanted_changed_();
@@ -118,6 +128,8 @@ class IOHCComponent : public Component {
   // line in on_receive() (frame numbering).
   uint32_t packets_received_{0};
   std::vector<IOHCCover *> status_covers_;
+  bool confirm_resend_wanted_{false};
+  uint32_t last_status_ms_{0};
 };
 
 }  // namespace iohc
