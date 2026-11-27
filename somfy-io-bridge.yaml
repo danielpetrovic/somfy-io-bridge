@@ -25,7 +25,7 @@ esphome:
   min_version: 2026.11.0
   project:
     name: "danielpetrovic.Somfy IO Bridge"
-    version: "1.0.2-2w7"
+    version: "1.0.2-2w8"
   # The vendored radio stack talks to the SX1276 directly via Arduino's SPI
   # library, and the Phase 2 pairing/command layer persists bonded remote
   # identities via Arduino's Preferences (NVS) library. Neither gets picked
@@ -445,27 +445,6 @@ switch:
       - logger.set_level: {level: INFO, tag: iohc.crypto}
       - logger.set_level: {level: INFO, tag: iohc.controller2w}
       - logger.set_level: {level: INFO, tag: iohc.key_extraction}
-  # laberning/home_io_control's idle listening: the receiver rotates over all
-  # three IO channels (2.7 ms each, held while a frame arrives) instead of
-  # staying on CH2, and learns this board's quiet level for the 2W channel
-  # access. Off by default until it is confirmed that 1W reception (remotes,
-  # Confirm And Resend) works as well with it on. Pairing steps and 2W
-  # exchanges keep their own listening either way.
-  - platform: template
-    name: "Debug Channel Hop (2W)"
-    icon: mdi:swap-horizontal
-    optimistic: true
-    restore_mode: ALWAYS_OFF
-    turn_on_action:
-      - logger.log:
-          format: "Debug Channel Hop (2W) turned ON - RX now rotating over CH1/CH2/CH3"
-          level: WARN
-      - lambda: id(iohc_hub).set_manual_hop_wanted(true);
-    turn_off_action:
-      - logger.log:
-          format: "Debug Channel Hop (2W) turned OFF - RX back to CH2 only"
-          level: WARN
-      - lambda: id(iohc_hub).set_manual_hop_wanted(false);
   # Confirm And Resend (2W). A 1W command gets no reply, but the motor's status
   # answer (overheard when TaHoma polls it, about 35 s after the command)
   # carries its real position. With this on, every Open/Close/Position waits

@@ -15,9 +15,8 @@ static const char *const TAG = "iohc";
 // is layered on top cooperatively via maybe_hop_() below.
 static uint32_t scan_freqs[1] = {CHANNEL2};
 
-// Cooperative hop, only while something has requested it (see iohc.h's
-// set_manual_hop_wanted()/set_bonding_hop_wanted()), with
-// laberning/home_io_control's timing: HOP_TIME_US per channel for the idle
+// Cooperative hop, always running (laberning/home_io_control's idle
+// listening), with its timing: HOP_TIME_US per channel for the idle
 // listen (proto_timing.h), the SX1276 hop slice for the rotating listens of
 // pairing and the roll-call (sx1276_discovery_hop_slice_ms), and the hold
 // rules of a reception in progress (radio_sx1276.h, radio_preamble_hold.h,
@@ -37,6 +36,8 @@ void IOHCComponent::setup() {
   ESP_LOGCONFIG(TAG, "Starting IOHC radio (vendored rspaargaren/iohomecontrol stack)...");
   IOHC::IohcPacketDelegate rx_cb(&IOHCComponent::on_receive, this);
   IOHC::iohcRadio::getInstance()->start(1, scan_freqs, 0, rx_cb, nullptr);
+  // The idle listening hops every 2.7 ms, faster than ESPHome's normal loop.
+  high_freq_loop_.start();
   controller2w_.begin(IOHC::iohcRadio::getInstance(), this, fixed_controller_hex_, fixed_system_key_hex_);
   key_extractor_.begin(IOHC::iohcRadio::getInstance(), this);
 }
@@ -60,9 +61,6 @@ void IOHCComponent::loop() {
 }
 
 void IOHCComponent::maybe_hop_() {
-  if (!manual_hop_wanted_ && !bonding_hop_wanted_ && !responder_hop_wanted_)
-    return;
-
   const uint32_t now = esphome::micros();
   const uint32_t now_ms = esphome::millis();
   auto state = IOHC::iohcRadio::radioState;
@@ -79,11 +77,11 @@ void IOHCComponent::maybe_hop_() {
     }
   }
 
-  // A plan set by a pairing step, scan or exchange wins over the manual
-  // switch while it runs; the manual switch is laberning's idle listening.
-  const HopPlan plan = plan_override_ ? hop_plan_ : (manual_hop_wanted_ ? HopPlan::ALL : hop_plan_);
+  // A plan set by a pairing step, scan or exchange wins over the idle
+  // listening while it runs.
+  const HopPlan plan = plan_override_ ? hop_plan_ : HopPlan::ALL;
   const bool rotating = plan == HopPlan::ALL || plan == HopPlan::SKIP_FREQ;
-  const bool idle_listen = rotating && !plan_override_ && manual_hop_wanted_;
+  const bool idle_listen = rotating && !plan_override_;
 
   if (state == IOHC::iohcRadio::RadioState::TX) {
     sync_since_us_ = 0;
@@ -175,30 +173,6 @@ void IOHCComponent::maybe_hop_() {
   IOHC::iohcRadio::getInstance()->retune(freq);
 }
 
-void IOHCComponent::hop_wanted_changed_() {
-  // Only an active bonding attempt needs the fast loop (it actually hops,
-  // many times a second, to catch a discovery reply): the key-extraction
-  // responder sits on one channel throughout and only needs maybe_hop_()
-  // running at the ordinary loop() rate for its stale-PREAMBLE check.
-  if (bonding_hop_wanted_ || manual_hop_wanted_) {
-    high_freq_loop_.start();
-  } else {
-    high_freq_loop_.stop();
-  }
-  if (!manual_hop_wanted_ && !bonding_hop_wanted_ && !responder_hop_wanted_) {
-    // Nobody wants the hop anymore - go back to CH2 immediately rather
-    // than waiting for the next (now-disabled) hop tick to happen to land
-    // there.
-    IOHC::iohcRadio::getInstance()->retune(CHANNEL2);
-    hop_freq_ = CHANNEL2;
-    hop_plan_ = HopPlan::ALL;
-    plan_override_ = false;
-    preamble_hold_active_ = false;
-    awaiting_redetect_ = false;
-    preamble_counted_ = false;
-  }
-}
-
 void IOHCComponent::set_hop_plan(HopPlan plan, uint32_t freq) {
   hop_plan_ = plan;
   plan_override_ = true;
@@ -215,30 +189,14 @@ void IOHCComponent::set_hop_plan(HopPlan plan, uint32_t freq) {
 }
 
 void IOHCComponent::release_hop_plan() {
-  // Back to idle listening: the manual switch's rotation when it is on,
-  // CH2 otherwise.
+  // Back to the idle listening.
   plan_override_ = false;
   hop_plan_ = HopPlan::ALL;
-  if (!manual_hop_wanted_ && !bonding_hop_wanted_) {
-    IOHC::iohcRadio::getInstance()->retune(CHANNEL2);
-    hop_freq_ = CHANNEL2;
-  }
 }
 
-void IOHCComponent::set_manual_hop_wanted(bool wanted) {
-  manual_hop_wanted_ = wanted;
-  hop_wanted_changed_();
-}
+void IOHCComponent::set_bonding_hop_wanted(bool wanted) { bonding_hop_wanted_ = wanted; }
 
-void IOHCComponent::set_bonding_hop_wanted(bool wanted) {
-  bonding_hop_wanted_ = wanted;
-  hop_wanted_changed_();
-}
-
-void IOHCComponent::set_responder_hop_wanted(bool wanted) {
-  responder_hop_wanted_ = wanted;
-  hop_wanted_changed_();
-}
+void IOHCComponent::set_responder_hop_wanted(bool wanted) { responder_hop_wanted_ = wanted; }
 
 bool IOHCComponent::on_receive(IOHC::iohcPacket *packet) {
   this->packets_received_++;

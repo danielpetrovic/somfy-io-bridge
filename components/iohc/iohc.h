@@ -66,18 +66,14 @@ class IOHCComponent : public Component {
 
   // Cooperative 3-channel RX hop, not built on iohcRadio's ISR-driven
   // auto-hop (a hardware interrupt could preempt a retune()-then-send()).
+  // It always runs: laberning/home_io_control's idle listening (all three
+  // channels, 2.7 ms each, never leaving a channel while a frame arrives
+  // there, with the idle RSSI readings the 2W channel access learns the busy
+  // limit from). A pairing step, scan or exchange sets its own plan with
+  // set_hop_plan() and ends it with release_hop_plan().
   //
-  // The manual switch ("Debug Channel Hop (2W)") is laberning/
-  // home_io_control's idle listening: all three channels, 2.7 ms each, never
-  // leaving a channel while a frame arrives there, and the idle RSSI readings
-  // the 2W channel access learns the busy limit from. Off (CH2 only) by
-  // default: an earlier, faster hop (0.9 ms per channel, no reception
-  // holds) lost 1W frames from a physical remote (Finding 32), so whether
-  // 1W reception holds up with this one is still to be tested.
-  //
-  // A pairing attempt or scan requests the hop on its own (set_bonding_hop_wanted());
-  // the two requests are tracked separately so one ending doesn't end the other.
-  void set_manual_hop_wanted(bool wanted);
+  // set_bonding_hop_wanted(): a pairing attempt or scan runs (hop statistics
+  // in the log).
   void set_bonding_hop_wanted(bool wanted);
 
   // Where the bonding-time hop listens. SKIP_FREQ: the two channels other
@@ -89,8 +85,7 @@ class IOHCComponent : public Component {
   // the key-extraction responder's own reply lands on a randomly chosen
   // channel (any of the three, matching what a real device does answering
   // a broadcast search), and the hub's follow-up frames keep coming back
-  // on that same channel for the rest of the session. The manual hop
-  // switch always sweeps all three channels regardless.
+  // on that same channel for the rest of the session.
   enum class HopPlan : uint8_t { ALL, SKIP_FREQ, HOLD_REQUEST, HOLD_FREQ };
   void set_hop_plan(HopPlan plan, uint32_t freq = 0);
   // Ends a plan set by set_hop_plan(): back to idle listening.
@@ -127,7 +122,6 @@ class IOHCComponent : public Component {
 
  protected:
   void maybe_hop_();
-  void hop_wanted_changed_();
   HopPlan hop_plan_{HopPlan::ALL};
   uint32_t hold_freq_{CHANNEL2};
   uint32_t skip_freq_{CHANNEL2};
@@ -151,7 +145,6 @@ class IOHCComponent : public Component {
   uint32_t hop_stats_ms_{0};
   bool preamble_counted_{false};
   uint32_t last_hop_us_{0};
-  bool manual_hop_wanted_{false};
   bool bonding_hop_wanted_{false};
   bool responder_hop_wanted_{false};
   bool passive_decode_wanted_{false};
