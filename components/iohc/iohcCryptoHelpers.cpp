@@ -220,45 +220,23 @@ namespace iohcCrypto {
 /*
     Builds the 16-byte KEY_TRANSFERT (0x32) payload sent after a device's
     CHALLENGE_REQUEST (0x3C) 6-byte challenge, during bonding's key-exchange
-    phase. IV = constructInitialValue({0x3C, the CHALLENGE_REQUEST's own cmd
-    byte, followed by its own 6-byte challenge}, challenge), AES-ECB
-    encrypted under the fixed, public transfer_key, then XORed with the real
-    per-installation system_key - this is what actually transfers the secret
-    (transfer_key only obfuscates it in transit; the device recovers
-    system_key by performing the identical AES-ECB encryption itself with
-    the transfer_key it already knows, then XORing that against what we
-    sent). frame_data corrected 2026-07-11 (io-2w-protocol.md Finding 28) -
-    previously used {0x31} (the KEY_INIT byte, never independently
-    confirmed), which was never verified against a real capture. Confirmed
-    correct against github.com/nicolas5000/io-rts-esp32's iohome_crypto.cpp
-    crypt_2w_key(), a real, independently-working passive key-sniffer (its
-    own README documents genuine successful key extractions) - its
-    challenge_fd buffer is built explicitly from the CHALLENGE_REQUEST
-    frame's own command_id + data, not the KEY_INIT frame's.
+    phase. IV = constructInitialValue({0x31}, challenge): the data part is
+    the single command byte of the KEY_INIT (0x31) that opened the exchange,
+    as in laberning/home_io_control's create_key_transfer() and
+    recover_system_key_from_transfer() (its key-extraction responder received
+    real keys from a Somfy TaHoma, a VELUX KLR 200 and a KLF 200 with it).
+    AES-ECB encrypted under the fixed, public transfer_key, then XORed with
+    the real per-installation system_key - this is what actually transfers
+    the secret (transfer_key only obfuscates it in transit; the device
+    recovers system_key by performing the identical AES-ECB encryption
+    itself with the transfer_key it already knows, then XORing that against
+    what we sent).
 */
-    void build_key_transfert_response(const uint8_t *motor_challenge, const uint8_t *system_key, uint8_t *out_response16,
-                                      bool iv_from_key_init) {
+    void build_key_transfert_response(const uint8_t *motor_challenge, const uint8_t *system_key, uint8_t *out_response16) {
         uint8_t btransfer[16];
         hexStringToBytes(transfer_key, btransfer);
 
-        // Two derivations of the IV data exist and the references disagree:
-        // - iv_from_key_init = true: the single byte of the KEY_INIT (0x31)
-        //   frame that opened the exchange. This is what
-        //   laberning/home_io_control uses; its key-extraction responder
-        //   received real keys from a Somfy TaHoma, a VELUX KLR 200 and a
-        //   KLF 200 with it (its recover_system_key_from_transfer()).
-        // - iv_from_key_init = false: the CHALLENGE_REQUEST's cmd byte (0x3C)
-        //   followed by its 6-byte challenge (nicolas5000/io-rts-esp32's
-        //   crypt_2w_key(), the form used here until 2026-11-27).
-        // The bonding attempt tries the first form first and the second form
-        // in its next round, so one test run covers both.
-        std::vector<uint8_t> frame_data;
-        if (iv_from_key_init) {
-            frame_data = {0x31};
-        } else {
-            frame_data = {0x3C};
-            frame_data.insert(frame_data.end(), motor_challenge, motor_challenge + 6);
-        }
+        const std::vector<uint8_t> frame_data = {0x31};
         std::vector<uint8_t> iv = constructInitialValue(frame_data, motor_challenge, nullptr);
 
         uint8_t encrypted[16];

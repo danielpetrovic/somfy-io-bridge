@@ -156,8 +156,11 @@ void IOHCKeyExtractor::listen_before_talk_() {
 }
 
 void IOHCKeyExtractor::send_reply_(iohcPacket *packet) {
+    // An answer to a frame addressed to us goes out at once on the session
+    // channel, without listen-before-talk or the radio's inter-send gap
+    // (laberning/home_io_control's responder does the same).
+    packet->in_session_reply = true;
     radio_->retune(session_freq_);
-    listen_before_talk_();
     radio_->send(packet);
 }
 
@@ -347,11 +350,8 @@ void IOHCKeyExtractor::handle_key_transfer_(iohcPacket *packet) {
     // XOR is its own inverse, so calling build_key_transfert_response()
     // with the HUB'S transfer payload in place of "system_key" recovers
     // the hub's real key instead of building a new transfer.
-    // iv_from_key_init=true matches the IV laberning/home_io_control's own
-    // recover_system_key_from_transfer() derives (the single 0x31 command
-    // byte) - the form a Somfy/TaHoma hub is expected to use.
     uint8_t recovered[16];
-    iohcCrypto::build_key_transfert_response(challenge_, transfer16, recovered, /*iv_from_key_init=*/true);
+    iohcCrypto::build_key_transfert_response(challenge_, transfer16, recovered);
     memcpy(recovered_key_, recovered, sizeof(recovered_key_));
     state_ = ResponderState::EXTRACTED;
 

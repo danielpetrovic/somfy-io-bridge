@@ -325,6 +325,8 @@ namespace IOHC {
                 attempt_.transfer_tries++;
                 send_key_transfer(attempt_.target_motor, attempt_.challenge);
                 attempt_.last_tx_ms = now;
+                ESP_LOGI(TAG, "Resent KEY_TRANSFER (0x32) to %02X%02X%02X (send %u/%u)", attempt_.target_motor[0],
+                         attempt_.target_motor[1], attempt_.target_motor[2], attempt_.transfer_tries, KEY_STEP_TRIES);
             } else {
                 ESP_LOGW(TAG, "2W bonding: no 0x33 after %u key transfers in round %u", KEY_STEP_TRIES,
                          attempt_.key_rounds);
@@ -416,28 +418,24 @@ namespace IOHC {
     }
 
     void IOHCController2W::send_key_transfer(const IOHC::address &to, const uint8_t *challenge6) {
-        // The IV of the key wrap is derived from the KEY_INIT byte in the first
-        // round and from the challenge frame in the next one (see
-        // build_key_transfert_response()), so one test covers both.
-        const bool iv_from_key_init = (attempt_.key_rounds % 2) == 1;
         uint8_t response[16];
-        iohcCrypto::build_key_transfert_response(challenge6, system_key_, response, iv_from_key_init);
+        iohcCrypto::build_key_transfert_response(challenge6, system_key_, response);
 
         // Continuation frame (neither start nor end) with the low-power flag set (18 20),
-        // behind the short response preamble.
+        // behind the short response preamble. It answers the motor's challenge
+        // and goes out at once: no listen-before-talk, no inter-send gap, no log
+        // line before it (laberning/home_io_control sends in-session answers
+        // unchecked; some devices reject an answer a few milliseconds late).
         auto *packet = new iohcPacket;
         forge_2w_frame(packet, controller_address_, to, false, false, true);
         packet->payload.packet.header.CtrlByte1.asStruct.MsgLen += sizeof(_p0x32);
         packet->payload.packet.header.cmd = 0x32;
         memcpy(packet->payload.packet.msg.p0x32.encrypted_key, response, 16);
         packet->start_preamble = PAIRING_CONTINUATION_PREAMBLE_SYMBOLS;
+        packet->in_session_reply = true;
         packet->buffer_length = packet->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
         radio_->retune(CHANNEL2);
-        listen_before_talk();
         radio_->send(packet);
-        ESP_LOGI(TAG, "Sent KEY_TRANSFER (0x32) to %02X%02X%02X (IV from %s, send %u/%u)", to[0], to[1], to[2],
-                 iv_from_key_init ? "the key-init byte" : "the challenge frame", attempt_.transfer_tries,
-                 KEY_STEP_TRIES);
     }
 
     void IOHCController2W::send_set_config1(const IOHC::address &to) {
@@ -558,14 +556,18 @@ namespace IOHC {
                     uint8_t answer[6];
                     iohcCrypto::build_challenge_answer(s.last_sent_cmd, s.last_sent_data,
                                                         packet->payload.packet.msg.p0x3c.challenge, s.key, answer);
+                    // Same shape and timing as laberning/home_io_control's
+                    // answer_challenge(): continuation frame, low-power set,
+                    // short response preamble, sent at once.
                     auto *reply = new iohcPacket;
-                    forge_2w_packet(reply, controller_address_, src);
+                    forge_2w_frame(reply, controller_address_, src, false, false, true);
                     reply->payload.packet.header.CtrlByte1.asStruct.MsgLen += sizeof(_p0x3d);
                     reply->payload.packet.header.cmd = 0x3D;
                     memcpy(reply->payload.packet.msg.p0x3d.response, answer, 6);
+                    reply->start_preamble = PAIRING_CONTINUATION_PREAMBLE_SYMBOLS;
+                    reply->in_session_reply = true;
                     reply->buffer_length = reply->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
                     radio_->retune(CHANNEL2);
-                    listen_before_talk();
                     radio_->send(reply);
                     s.cmd_state = CmdState::ANSWERED_WAITING_ACK;
                     s.cmd_sent_ms = esphome::millis();
@@ -612,11 +614,14 @@ namespace IOHC {
 
         // While a bonding attempt waits, every frame heard is logged with its
         // addresses, so a reply that arrives from an unexpected address or on
-        // an unexpected channel is visible instead of silently dropped.
-        ESP_LOGI(TAG, "Bonding RX: cmd=0x%02X %02X%02X%02X -> %02X%02X%02X, %s, len=%u, %.1f dBm, %lu Hz", cmd,
-                 source[0], source[1], source[2], target[0], target[1], target[2],
-                 packet->payload.packet.header.CtrlByte1.asStruct.Protocol ? "1W" : "2W", packet->buffer_length,
-                 packet->rssi, static_cast<unsigned long>(packet->frequency));
+        // an unexpected channel is visible instead of silently dropped. Not a
+        // challenge: it must be answered before anything is printed.
+        if (cmd != 0x3C) {
+            ESP_LOGI(TAG, "Bonding RX: cmd=0x%02X %02X%02X%02X -> %02X%02X%02X, %s, len=%u, %.1f dBm, %lu Hz", cmd,
+                     source[0], source[1], source[2], target[0], target[1], target[2],
+                     packet->payload.packet.header.CtrlByte1.asStruct.Protocol ? "1W" : "2W", packet->buffer_length,
+                     packet->rssi, static_cast<unsigned long>(packet->frequency));
+        }
 
         // The discovery reply is accepted from whichever motor answers: the
         // configured motor address may not be what the motor reports after a
@@ -702,13 +707,14 @@ namespace IOHC {
                     return true;
                 }
                 if (cmd != 0x3C || data_len != 6) return false;
-                ESP_LOGI(TAG, "Received CHALLENGE_REQ (0x3C) - sending KEY_TRANSFER");
                 memcpy(attempt_.challenge, data, sizeof(attempt_.challenge));
                 attempt_.transfer_tries = 1;
                 send_key_transfer(source, attempt_.challenge);
                 attempt_.last_tx_ms = now;
                 attempt_.state = BondState::SENT_KEY_TRANSFER;
                 attempt_.state_entered_ms = now;
+                ESP_LOGI(TAG, "Received CHALLENGE_REQ (0x3C) on %lu Hz, %.1f dBm - sent KEY_TRANSFER (0x32) at once",
+                         static_cast<unsigned long>(packet->frequency), packet->rssi);
                 return true;
 
             case BondState::SENT_KEY_TRANSFER:

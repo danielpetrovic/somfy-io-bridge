@@ -433,6 +433,10 @@ namespace IOHC {
         // start preamble (the 2W discovery broadcast): real controllers send the
         // discovery behind about 52 bytes, and some receivers ignore a long one.
         uint16_t start_preamble = 0;
+        // A single answer to a 2W frame addressed to this bridge (0x32, 0x3D,
+        // the responder's replies). It skips the radio's inter-send gap: the
+        // device only listens for its answer for a few milliseconds.
+        bool in_session_reply = false;
         unsigned long delayed = 0;
 
         double afc{}; // AFC freq correction applied

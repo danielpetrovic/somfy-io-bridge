@@ -355,8 +355,13 @@ void iohcRadio::startQueuedSend() {
     // called every IOHCComponent::loop() tick as well as from send(), so a
     // batch that's still cooling down gets retried automatically within one
     // tick of the cooldown elapsing.
+    // An in-session 2W answer is exempt: one frame to the device that just
+    // spoke to us cannot form the multi-motor burst the gap guards against,
+    // and an answer held back by it arrives too late to be accepted.
     uint32_t now_us = esp_timer_get_time();
-    if (now_us - last_send_started_us_ < MIN_INTER_SEND_US) {
+    const auto &next = sendQueue.front();
+    const bool in_session_reply = next.size() == 1 && next[0]->in_session_reply;
+    if (!in_session_reply && now_us - last_send_started_us_ < MIN_INTER_SEND_US) {
         return;
     }
     last_send_started_us_ = now_us;
