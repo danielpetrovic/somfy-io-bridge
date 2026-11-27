@@ -42,6 +42,16 @@ void IOHCCover::setup() {
   cover_prefs_namespace_ = cover_nvs_namespace_for(this->nvs_key_);
   cover_prefs_.begin(cover_prefs_namespace_.c_str(), false);
   mode_ = static_cast<Mode>(cover_prefs_.getUChar("mode", static_cast<uint8_t>(Mode::POSITION)));
+  if (mode_ == Mode::MY) {
+    // "Open / My / Close" was removed from the select's options 2026-11-27
+    // (unused). A cover whose NVS still holds the old value 1 migrates to
+    // Position, the only remaining mode that still covers the same ground
+    // (percentage targets) - never left reinterpreted as whatever a future
+    // mode might someday reuse that numeric value for.
+    ESP_LOGW(TAG, "This cover's saved mode was 'Open / My / Close', which has been removed - migrated to Position");
+    mode_ = Mode::POSITION;
+    cover_prefs_.putUChar("mode", static_cast<uint8_t>(mode_));
+  }
   // Live value the remote actually uses - falls back to the compile-time
   // YAML-resolved seed only on first-ever boot (no persisted value yet).
   // Set live via the My Pattern switch from here on - see
@@ -342,7 +352,7 @@ void IOHCCover::dump_config() {
   LOG_COVER("", "Somfy IOHC Cover", this);
   ESP_LOGCONFIG(TAG, "  Paired: %s", remote_.is_paired() ? "yes" : "no");
   const char *mode_name =
-      mode_ == Mode::POSITION ? "Position" : mode_ == Mode::MY ? "Open / My / Close" : "Two-Way (Experimental)";
+      mode_ == Mode::POSITION ? "Position (1W)" : "Two-Way (2W)";
   ESP_LOGCONFIG(TAG, "  Mode: %s", mode_name);
   ESP_LOGCONFIG(TAG, "  Invert Direction: %s", invert_ ? "yes" : "no");
   ESP_LOGCONFIG(TAG, "  Travel time open/close: %lus / %lus", travel_time_open_, travel_time_close_);
@@ -350,7 +360,7 @@ void IOHCCover::dump_config() {
 
 cover::CoverTraits IOHCCover::get_traits() {
   auto traits = cover::CoverTraits();
-  // Traits stay constant across all 3 modes (position support always on) so
+  // Traits stay constant across both modes (position support always on) so
   // switching modes at runtime doesn't require HA to re-discover the entity.
   traits.set_is_assumed_state(true);
   traits.set_supports_position(true);
@@ -361,12 +371,9 @@ cover::CoverTraits IOHCCover::get_traits() {
 
 void IOHCCover::press_my() {
   remote_.cmd(IOHC::RemoteButton::Vent);
-  if (mode_ == Mode::MY) {
-    this->position = 0.5f;
-    cover_prefs_.putFloat("position", 0.5f);
-  } else {
-    target_position_ = -1.0f;
-  }
+  // No known target position (My goes to a stored favorite, not a percentage
+  // we commanded), so there is nothing to clamp the travel-time estimate to.
+  target_position_ = -1.0f;
   this->current_operation = cover::COVER_OPERATION_IDLE;
   this->publish_state();
 }
@@ -422,17 +429,12 @@ void IOHCCover::control(const cover::CoverCall &call) {
   if (call.get_stop()) {
     confirm_pending_ = false;
     remote_.cmd(IOHC::RemoteButton::Stop);
-    if (mode_ == Mode::MY) {
-      this->position = 0.5f;
-      cover_prefs_.putFloat("position", 0.5f);
-    } else {
-      target_position_ = -1.0f;
-      // tracker.getPosition() is raw/motor-space (see loop()'s own
-      // comment) - needs the same HA-space conversion before persisting,
-      // or an inverted cover's stored position silently ends up wrong.
-      float raw = remote_.position_tracker().getPosition() / 100.0f;
-      cover_prefs_.putFloat("position", invert_ ? (1.0f - raw) : raw);
-    }
+    target_position_ = -1.0f;
+    // tracker.getPosition() is raw/motor-space (see loop()'s own
+    // comment) - needs the same HA-space conversion before persisting,
+    // or an inverted cover's stored position silently ends up wrong.
+    float raw = remote_.position_tracker().getPosition() / 100.0f;
+    cover_prefs_.putFloat("position", invert_ ? (1.0f - raw) : raw);
     this->current_operation = cover::COVER_OPERATION_IDLE;
     this->publish_state();
     return;
@@ -443,36 +445,6 @@ void IOHCCover::control(const cover::CoverCall &call) {
 
   float target = *call.get_position(); // 0 (closed) .. 1 (open)
   int percent = static_cast<int>(lroundf(target * 100.0f));
-
-  if (mode_ == Mode::MY) {
-    confirm_pending_ = false;
-    // 3 discrete states, any intermediate request maps to the "My"/favorite
-    // position. Unlike RTS (where My and Stop are genuinely the same
-    // physical button), IO's real "My" is a distinct command (Vent,
-    // main=0xd8) from Stop (main=0xd2) - confirmed via a live capture of a
-    // real TaHoma "My" press. Stop only does something while the motor is
-    // actively moving, which is why this previously did nothing when the
-    // cover was already idle. The dedicated Stop button above (call.get_stop())
-    // still sends real Stop, for interrupting an in-progress move.
-    // this->position always echoes back exactly what was requested,
-    // regardless of Invert Direction - it's HA-facing, and what the user
-    // asked for is correct either way. Only which RemoteButton actually
-    // gets sent to the motor flips.
-    if (percent >= 100) {
-      remote_.cmd(invert_ ? IOHC::RemoteButton::Close : IOHC::RemoteButton::Open);
-      this->position = 1.0f;
-    } else if (percent <= 0) {
-      remote_.cmd(invert_ ? IOHC::RemoteButton::Open : IOHC::RemoteButton::Close);
-      this->position = 0.0f;
-    } else {
-      remote_.cmd(IOHC::RemoteButton::Vent); // direction-agnostic, no invert needed
-      this->position = 0.5f;
-    }
-    cover_prefs_.putFloat("position", this->position);
-    this->current_operation = cover::COVER_OPERATION_IDLE;
-    this->publish_state();
-    return;
-  }
 
   // Mode::POSITION. target_position_ and target_raw_opening_ are
   // deliberately kept in raw/motor space throughout (matching

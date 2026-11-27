@@ -17,14 +17,19 @@ class IOHCCover : public cover::Cover, public Component {
   //   between send and arrival is a local BlindPosition travel-time
   //   estimate - purely cosmetic (animates "still moving" in HA), clamped to
   //   land exactly on the commanded target regardless of timing drift.
-  // MY: matches the RTS bridge's own default model exactly - 3 discrete
-  //   states (0.0 closed / 0.5 MY-or-stopped / 1.0 open), no time tracking.
-  //   Any position request strictly between 0 and 1 maps to the physical
-  //   MY/Stop button (cmd main=0xd2), same button either way. The only mode
-  //   that does NOT send arbitrary percentage targets.
   // TWO_WAY: real motor-reported position via the 2W challenge/response
   //   layer - not implemented yet, selecting it just logs a warning and
   //   ignores commands.
+  //
+  // MY (retired 2026-11-27, kept only as a migration target below): the RTS
+  // bridge's own default model - 3 discrete states (0.0 closed / 0.5
+  // MY-or-stopped / 1.0 open), no time tracking. Removed from the select's
+  // options (select/__init__.py) as unused on this bridge's own install, and
+  // no other known install was ever confirmed using it either. Numeric
+  // value kept so a cover whose persisted "mode" byte is still 1 can be
+  // recognized and migrated to Position rather than silently reinterpreted
+  // as something else - see setup()'s load of this value. Never construct
+  // this value outside that one migration check.
   enum class Mode : uint8_t { POSITION = 0, MY = 1, TWO_WAY = 2 };
 
   void setup() override;
