@@ -25,7 +25,7 @@ esphome:
   min_version: 2026.11.0
   project:
     name: "danielpetrovic.Somfy IO Bridge"
-    version: "1.0.2-2w6"
+    version: "1.0.2-2w7"
   # The vendored radio stack talks to the SX1276 directly via Arduino's SPI
   # library, and the Phase 2 pairing/command layer persists bonded remote
   # identities via Arduino's Preferences (NVS) library. Neither gets picked
@@ -151,6 +151,20 @@ wifi:
 api:
   encryption:
     key: !secret io_bridge_api_key
+  # laberning/home_io_control's pairing actions, under the same names
+  # (esphome.somfy_io_bridge_pair_device / _scan_paired_devices).
+  # pair_device: the key exchange straight to a device a cover declares as
+  # its motor_address, without discovery; open the device's pairing window
+  # first. scan_paired_devices: the same roll-call as the button below.
+  actions:
+    - action: pair_device
+      variables:
+        device_id: string
+      then:
+        - lambda: id(iohc_hub).controller2w().pair_device(device_id);
+    - action: scan_paired_devices
+      then:
+        - lambda: id(iohc_hub).controller2w().scan_paired_devices();
 
 ota:
   - platform: esphome
@@ -369,6 +383,16 @@ button:
   - platform: restart
     name: "Restart"
     entity_category: diagnostic
+  # laberning/home_io_control's Scan Paired Devices: a roll-call under this
+  # bridge's 2W key. Every device that holds the key answers, whether or not
+  # a cover declares it; the log lists them. Transmits only the roll-call,
+  # nothing moves. Takes about 12 seconds.
+  - platform: template
+    name: "Scan Paired Devices (2W)"
+    icon: mdi:radar
+    entity_category: config
+    on_press:
+      - lambda: id(iohc_hub).controller2w().scan_paired_devices();
   # Passive 2W key-sniffing (Findings 27/28) no longer has its own button -
   # it's auto-armed/disarmed by the Debug Logging switch below instead (see
   # that switch's turn_on_action/turn_off_action), bridge-wide rather than
@@ -421,15 +445,12 @@ switch:
       - logger.set_level: {level: INFO, tag: iohc.crypto}
       - logger.set_level: {level: INFO, tag: iohc.controller2w}
       - logger.set_level: {level: INFO, tag: iohc.key_extraction}
-  # Opportunistic background 3-channel RX hop (Finding 31/32) - deliberately
-  # its own switch, separate from Debug Logging: this is about giving the
-  # radio a shot at catching a rare bonding-key exchange on CH1/CH3, not
-  # about log verbosity, and running it unattended for a long stretch
-  # shouldn't require also paying for continuous VERY_VERBOSE logging
-  # overhead. Costs real 1W/ordinary-2W reception reliability while on (see
-  # iohc.h's set_manual_hop_wanted() comment) - CH2-only (fully reliable)
-  # otherwise. Safe to combine with Debug Logging or an active
-  # Program (2W) bonding attempt, which requests the hop independently.
+  # laberning/home_io_control's idle listening: the receiver rotates over all
+  # three IO channels (2.7 ms each, held while a frame arrives) instead of
+  # staying on CH2, and learns this board's quiet level for the 2W channel
+  # access. Off by default until it is confirmed that 1W reception (remotes,
+  # Confirm And Resend) works as well with it on. Pairing steps and 2W
+  # exchanges keep their own listening either way.
   - platform: template
     name: "Debug Channel Hop (2W)"
     icon: mdi:swap-horizontal
@@ -437,7 +458,7 @@ switch:
     restore_mode: ALWAYS_OFF
     turn_on_action:
       - logger.log:
-          format: "Debug Channel Hop (2W) turned ON - RX now sweeping CH1/CH2/CH3"
+          format: "Debug Channel Hop (2W) turned ON - RX now rotating over CH1/CH2/CH3"
           level: WARN
       - lambda: id(iohc_hub).set_manual_hop_wanted(true);
     turn_off_action:

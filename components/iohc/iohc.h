@@ -40,6 +40,7 @@ class IOHCComponent : public Component {
   // (our own remote address) or by the motor address. Nothing is decoded
   // unless "Debug Passive Decode (2W)" is on.
   void register_status_cover(IOHCCover *cover) { this->status_covers_.push_back(cover); }
+  const std::vector<IOHCCover *> &covers() const { return this->status_covers_; }
 
   // This bridge's own 2W bonding/control (Phase 3) - one shared instance for
   // the whole bridge, see iohc_controller2w.h. Distinct from the passive
@@ -63,45 +64,26 @@ class IOHCComponent : public Component {
   void set_fixed_controller_address(const std::string &hex) { fixed_controller_hex_ = hex; }
   void set_fixed_system_key(const std::string &hex) { fixed_system_key_hex_ = hex; }
 
-  // Fast cooperative 3-channel RX hop (Finding 31/32) - DISABLED (CH2 only)
-  // by default. Deliberately NOT built on iohcRadio's own ISR-driven
-  // num_freqs/tickerCounter auto-hop mechanism (which stays permanently
-  // disabled, num_freqs=1) - that's a genuine hardware interrupt and can
-  // preempt mid-instruction, which would race against the
-  // retune()-then-send() sequence every TX call site relies on. This hop
-  // instead mirrors how github.com/laberning/home_io_control's own
-  // reference implementation actually achieves its documented ~2.7ms hop
-  // cadence: a cooperative maybe_hop()-style check with no interrupt
-  // involved, so it can only ever run between top-level calls, never mid-TX
-  // - no critical section needed, nothing to race.
+  // Cooperative 3-channel RX hop, not built on iohcRadio's ISR-driven
+  // auto-hop (a hardware interrupt could preempt a retune()-then-send()).
   //
-  // Why disabled by default (Finding 32, real-hardware regression): every
-  // 1W frame (any remote) and the vast majority of ordinary 2W traffic
-  // (TaHoma's own routine polling of already-bonded motors) is CH2-only in
-  // practice - confirmed by this entire project's history of reliable
-  // CH2-only decode, and by proto_timing.h's own "commands are sent on
-  // CH2" statement. The reference hops continuously by default because
-  // it's an ACTIVE controller: if a response lands on the wrong channel,
-  // it can just retry its own command. This bridge's passive decode of
-  // TaHoma's traffic has no such retry available - one missed frame is
-  // just gone. Confirmed on real hardware: with the hop always on, a full
-  // 7-minute capture caught every 2W exchange but zero 1W frames from a
-  // physical remote pressed repeatedly during that window.
+  // The manual switch ("Debug Channel Hop (2W)") is laberning/
+  // home_io_control's idle listening: all three channels, 2.7 ms each, never
+  // leaving a channel while a frame arrives there, and the idle RSSI readings
+  // the 2W channel access learns the busy limit from. Off (CH2 only) by
+  // default: an earlier, faster hop (0.9 ms per channel, no reception
+  // holds) lost 1W frames from a physical remote (Finding 32), so whether
+  // 1W reception holds up with this one is still to be tested.
   //
-  // Two independent callers can each request the hop - the dedicated
-  // "Channel Hop (2W)" switch (somfy-io-bridge.yaml,
-  // deliberately separate from Debug Logging - opportunistic background
-  // sniffing is a distinct concern from log verbosity, and running it
-  // unattended for a long stretch shouldn't require also paying for
-  // continuous VERY_VERBOSE logging) and IOHCController2W::arm_bonding()
-  // (the ~60s DISCOVER-wait window) - tracked separately so one's request
-  // ending doesn't kill the other's still-active one.
+  // A pairing attempt or scan requests the hop on its own (set_bonding_hop_wanted());
+  // the two requests are tracked separately so one ending doesn't end the other.
   void set_manual_hop_wanted(bool wanted);
   void set_bonding_hop_wanted(bool wanted);
 
-  // Where the bonding-time hop listens. DISCOVERY: CH1 and CH3 only (a reply
-  // to the 0x28 broadcast almost never comes back on the channel it was sent
-  // on, so dwelling on CH2 wastes listening time). HOLD_REQUEST: stay on CH2
+  // Where the bonding-time hop listens. SKIP_FREQ: the two channels other
+  // than `freq` (a reply to a broadcast almost never comes back on the
+  // channel it was sent on, so dwelling there wastes listening time;
+  // laberning's ROTATE_SKIPPING_REQUEST). ALL: all three. HOLD_REQUEST: stay on CH2
   // (every unicast pairing reply comes back on the request channel).
   // HOLD_FREQ: stay on whatever `hold_freq` is, without retuning to CH2 -
   // the key-extraction responder's own reply lands on a randomly chosen
@@ -109,8 +91,10 @@ class IOHCComponent : public Component {
   // a broadcast search), and the hub's follow-up frames keep coming back
   // on that same channel for the rest of the session. The manual hop
   // switch always sweeps all three channels regardless.
-  enum class HopPlan : uint8_t { ALL, DISCOVERY, HOLD_REQUEST, HOLD_FREQ };
-  void set_hop_plan(HopPlan plan, uint32_t hold_freq = 0);
+  enum class HopPlan : uint8_t { ALL, SKIP_FREQ, HOLD_REQUEST, HOLD_FREQ };
+  void set_hop_plan(HopPlan plan, uint32_t freq = 0);
+  // Ends a plan set by set_hop_plan(): back to idle listening.
+  void release_hop_plan();
 
   // Requests the same stale-PREAMBLE recovery maybe_hop_() already does for
   // the bonding attempt, for the key-extraction responder's own held
@@ -146,11 +130,20 @@ class IOHCComponent : public Component {
   void hop_wanted_changed_();
   HopPlan hop_plan_{HopPlan::ALL};
   uint32_t hold_freq_{CHANNEL2};
+  uint32_t skip_freq_{CHANNEL2};
+  uint32_t hop_freq_{CHANNEL2};
+  uint8_t hops_since_reading_{0};
+  bool plan_override_{false};
+  bool preamble_hold_active_{false};
+  bool awaiting_redetect_{false};
+  uint32_t preamble_slice_start_ms_{0};
+  uint32_t preamble_chain_start_ms_{0};
+  uint32_t redetect_since_ms_{0};
+  uint32_t sync_since_us_{0};
   // ESPHome calls loop() about every 16 ms unless a component asks for a fast
   // loop, which would make the "900 us" hop several times slower. Requested
   // only while a bonding attempt wants the hop.
   HighFrequencyLoopRequester high_freq_loop_;
-  uint32_t preamble_since_us_{0};
   // Counters for the once-per-2-s bonding line (see maybe_hop_()).
   uint32_t hop_count_{0};
   uint32_t preamble_count_{0};
@@ -158,7 +151,6 @@ class IOHCComponent : public Component {
   uint32_t hop_stats_ms_{0};
   bool preamble_counted_{false};
   uint32_t last_hop_us_{0};
-  uint8_t hop_channel_idx_{0};
   bool manual_hop_wanted_{false};
   bool bonding_hop_wanted_{false};
   bool responder_hop_wanted_{false};

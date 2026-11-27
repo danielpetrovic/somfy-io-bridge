@@ -378,28 +378,13 @@ void IOHCCover::press_my() {
   this->publish_state();
 }
 
-void IOHCCover::press_prog2w() {
-  if (!has_motor_address_) {
-    ESP_LOGW(TAG, "Program (2W) pressed but this cover has no motor_address configured - see README's Real "
-                  "position feedback section for how to look it up. Refusing to arm (will not listen for just "
-                  "any DISCOVER broadcast).");
-    return;
-  }
-  parent_->controller2w().arm_bonding(motor_address_, this);
-}
+void IOHCCover::press_prog2w() { parent_->controller2w().discover_and_pair(); }
 
 void IOHCCover::control(const cover::CoverCall &call) {
   if (mode_ == Mode::TWO_WAY) {
-    // Phase 3d - real 2W command, only possible once this motor has
-    // actually bonded via arm_bonding(). The corrected, controller-initiated
-    // bonding sequence and crypto (Finding 20 onward) have been validated
-    // against real captured frames, but this bridge's own Program (2W)
-    // attempt has never yet completed a full bonding cycle on real hardware
-    // (Findings 21/23/25/26 - repeated real tests, always zero 0x29 reply) -
-    // see IOHCController2W::send_command()'s own bonded check for the
-    // actual gate, which is why every command here still refuses in
-    // practice. Same main-byte formula as 1W (Finding 11), reused rather
-    // than re-derived.
+    // 2W command under this bridge's system key. The motor must hold that
+    // key (paired with Program (2W) or the pair_device action); same
+    // main-byte formula as 1W (Finding 11).
     if (!has_motor_address_) {
       ESP_LOGW(TAG, "Two-Way mode selected but this cover has no motor_address configured - refusing");
       return;
@@ -422,7 +407,7 @@ void IOHCCover::control(const cover::CoverCall &call) {
     } else {
       return;
     }
-    parent_->controller2w().send_command(motor_address_, main0, main1, this);
+    parent_->controller2w().send_command(motor_address_, low_power_2w_, main0, main1, this);
     return;
   }
 

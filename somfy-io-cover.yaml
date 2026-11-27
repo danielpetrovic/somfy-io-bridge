@@ -39,6 +39,7 @@ substitutions:
   key: ""
   broadcast_type: "0"
   motor_address: ""
+  low_power: "false"
   my_pattern: "auto"
   invert: "false"
   travel_time_open: "25"
@@ -60,6 +61,7 @@ cover:
     key: ${key}
     broadcast_type: ${broadcast_type}
     motor_address: ${motor_address}
+    low_power: ${low_power}
     my_pattern: ${my_pattern}
     invert: ${invert}
     travel_time_open: ${travel_time_open}

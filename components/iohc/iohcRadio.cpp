@@ -355,13 +355,12 @@ void iohcRadio::startQueuedSend() {
     // called every IOHCComponent::loop() tick as well as from send(), so a
     // batch that's still cooling down gets retried automatically within one
     // tick of the cooldown elapsing.
-    // An in-session 2W answer is exempt: one frame to the device that just
-    // spoke to us cannot form the multi-motor burst the gap guards against,
-    // and an answer held back by it arrives too late to be accepted.
+    // A 2W pairing frame or in-session answer is exempt (iohcPacket::
+    // skip_send_gap): an answer held back by the gap arrives too late.
     uint32_t now_us = esp_timer_get_time();
     const auto &next = sendQueue.front();
-    const bool in_session_reply = next.size() == 1 && next[0]->in_session_reply;
-    if (!in_session_reply && now_us - last_send_started_us_ < MIN_INTER_SEND_US) {
+    const bool skip_gap = next.size() == 1 && next[0]->skip_send_gap;
+    if (!skip_gap && now_us - last_send_started_us_ < MIN_INTER_SEND_US) {
         return;
     }
     last_send_started_us_ = now_us;

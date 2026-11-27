@@ -117,13 +117,15 @@ class IOHCCover : public cover::Cover, public Component {
   // just sending Vent instead of Stop.
   void press_my();
 
-  // "Program (2W)" button entry point (Phase 3) - arms this bridge's shared
-  // IOHC::IOHCController2W to bond with this cover's own motor_address.
-  // Requires motor_address to be set (see set_motor_address()) - fails fast
-  // with a log warning otherwise, never falls back to "listen for any
-  // motor's DISCOVER broadcast" (see the plan file's "scoping DISCOVER
-  // matches" rationale - a real security consideration, not just tidiness).
+  // "Program (2W)" button: laberning's Discover & Pair
+  // (IOHC::IOHCController2W::discover_and_pair()). Whichever device answers
+  // the discovery is paired; the log names it and the cover that declares it.
   void press_prog2w();
+
+  // The motor is a low-power (battery) receiver: its 2W frames need the
+  // wake-up preamble (laberning's per-device `low_power:`).
+  void set_low_power_2w(bool low_power) { low_power_2w_ = low_power; }
+  bool low_power_2w() const { return low_power_2w_; }
 
   // Real motor address (6 hex chars) - as assigned by Somfy, NOT this
   // bridge's own 1W virtual remote identity (node/key above, which is a
@@ -203,6 +205,7 @@ class IOHCCover : public cover::Cover, public Component {
   std::string nvs_key_;
   IOHC::address motor_address_{};
   bool has_motor_address_{false};
+  bool low_power_2w_{false};
   sensor::Sensor *target_closure_sensor_{nullptr};
   sensor::Sensor *last_rssi_sensor_{nullptr};
   sensor::Sensor *resends_sensor_{nullptr};

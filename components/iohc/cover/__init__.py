@@ -35,6 +35,7 @@ CONF_MANUFACTURER = "manufacturer"
 CONF_NODE = "node"
 CONF_KEY = "key"
 CONF_MOTOR_ADDRESS = "motor_address"
+CONF_LOW_POWER = "low_power"
 CONF_MY_PATTERN = "my_pattern"
 CONF_INVERT = "invert"
 CONF_TRAVEL_TIME_OPEN = "travel_time_open"
@@ -82,6 +83,10 @@ CONFIG_SCHEMA = cover.cover_schema(IOHCCover, device_class="shutter").extend(
         # leave unset if you don't have one, or don't want passive position
         # sync for this cover.
         cv.Optional(CONF_MOTOR_ADDRESS, default=""): validate_hex_string(6),
+        # The motor is a low-power (battery) receiver: its 2W frames need the
+        # wake-up preamble. Same meaning as laberning/home_io_control's
+        # per-device `low_power:`; read by 2W commands and pair_device.
+        cv.Optional(CONF_LOW_POWER, default=False): cv.boolean,
         # Which real-hardware-confirmed My/Set My wire pattern this motor
         # starts on - see IOHC::RemoteButton::Vent/SetMy's own comments in
         # iohc_remote1w.h for what each does and why both are genuinely
@@ -156,6 +161,7 @@ async def to_code(config):
         cg.add(var.set_fixed_key(config[CONF_KEY]))
     if config[CONF_MOTOR_ADDRESS]:
         cg.add(var.set_motor_address(config[CONF_MOTOR_ADDRESS]))
+    cg.add(var.set_low_power_2w(config[CONF_LOW_POWER]))
 
     my_pattern = config[CONF_MY_PATTERN]
     if my_pattern == "auto":

@@ -99,6 +99,12 @@ namespace IOHC {
             // rather than only being drained by the next unrelated send().
             void startQueuedSend();
 
+            // Nothing transmitting and nothing waiting to: a retune now cannot
+            // land in the middle of a transmission.
+            bool tx_idle() const {
+                return radioState != RadioState::TX && packets2send.empty() && sendQueue.empty();
+            }
+
         private:
             iohcRadio();
             bool receive(bool stats);

@@ -14,58 +14,32 @@
    limitations under the License.
  */
 
-// Phase 3 - this bridge acting as a real 2W controller (the role TaHoma
-// plays), not just passively decoding another controller's traffic (that
-// existing feature is IOHCCover::update_real_position(), unrelated to this
-// file). See /root/.claude/plans/i-bought-a-lilygo-clever-planet.md's Phase
-// 3 section and /config/.claude/io-2w-protocol.md (Findings 12-20) for the
-// full research this is built on.
+// This bridge acting as a 2W controller (the role TaHoma plays), ported from
+// laberning/home_io_control:
+//   - PairingEngine (pairing_engine.cpp): discover_and_pair(),
+//     pair_declared_device() and the scan_paired_devices roll-call (roll_call.cpp);
+//   - ExchangeEngine::send_and_receive() (exchange_engine.cpp): the attempt
+//     plans (decisions_attempts.h), channel access with a busy limit learned
+//     from the board's quiet level (decisions_channel.h, channel_quiet_level.h),
+//     the low-power wake belief, the challenge answer and the repeat rules of
+//     an unconfirmed request;
+//   - the cover command path (hub_operations.cpp): the EXECUTE payload, the
+//     confirmation status read and the follow-up reads of a moving device
+//     (hub_status.cpp, status_poll_policy.cpp).
+// That component blocks while it waits; this bridge receives on a separate
+// task, so each wait is a state here, advanced from loop() (timeouts) and
+// handle_frame() (replies). Only one exchange runs at a time, as there.
 //
-// REDESIGNED 2026-07-11 (Finding 20): every earlier attempt at this class
-// assumed the MOTOR sends 0x28 DISCOVER spontaneously when its physical
-// pairing button is pressed, with the box only ever replying
-// (0x29/0x2C/0x32/...). That assumption is backwards, and is exactly why
-// three independent real-hardware tests (Findings 12/15/17) found nothing.
-// Confirmed by reading github.com/laberning/home_io_control - a mature,
-// independently-tested ESPHome IO-Homecontrol component with confirmed
-// real 2W pairing on the same SX1276 chip family - the CONTROLLER
-// broadcasts 0x28 DISCOVER; a device already in pairing mode (physical
-// button already pressed, same as before) just listens and answers with
-// 0x29. The rest of bonding (0x31 KEY_INIT -> 0x3C CHALLENGE_REQ -> 0x32
-// KEY_TRANSFER -> 0x33 KEY_CONFIRM) is also controller-initiated. See
-// io-2w-protocol.md Finding 20 for the full byte-level writeup, including
-// the real crypto bug this also exposed: per-command authentication (and
-// the KEY_TRANSFER payload itself) needs a real per-installation
-// `system_key`, not the fixed/public transfer_key this class used
-// everywhere before.
-//
-// Everything downstream of bonding (the per-command challenge/response
-// frame shape) was, and remains, thoroughly confirmed against many real
-// TaHoma captures - only the bonding sequence itself and the crypto key
-// used for ongoing authentication were wrong.
-//
-// REVISED AGAIN 2026-07-12 (Finding 22): Finding 20's redesign still got
-// zero 0x29 replies on two different motors, both with real-hardware-
-// confirmed open pairing windows (physical jog). Root cause found by
-// reading home_io_control's proto_timing.h directly rather than just its
-// higher-level docs: "Commands are sent on CH2; responses may arrive on
-// any channel." Finding 20/21's implementation hopped the TRANSMIT channel
-// for 0x28 across CH1/CH2/CH3 - backwards. The reference always transmits
-// on CH2 and only hops the RECEIVE side while waiting for a reply (at a
-// ~2.7ms ISR-driven cadence in their design - impractical to match exactly
-// in this bridge's own architecture without touching the ISR layer, but a
-// much faster loop()-driven RX hop than Finding 21's crude 5s-per-channel
-// dwell is a real, tractable improvement). Also added Listen-Before-Talk
-// (LBT) before every 2W transmission - proto_timing.h documents this as a
-// real ETSI EN 300 220 compliance mechanism the reference implements and
-// this bridge never had at all, and this session already captured direct
-// evidence of real RF contention (TaHoma's own traffic landing mid-attempt
-// during a bonding test).
+// As in that component, a device is commanded under this bridge's one system
+// key without any per-device "bonded" record: a cover whose Mode is Two-Way is
+// treated as paired, the way a 2W device declared in that component's YAML is.
 
 #ifndef IOHC_CONTROLLER2W_H
 #define IOHC_CONTROLLER2W_H
 
 #include <Preferences.h>
+#include <array>
+#include <optional>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -81,230 +55,298 @@ class IOHCComponent;
 
 namespace IOHC {
 
-    enum class BondState : uint8_t {
+    // What the pairing engine is doing (laberning's PairingState, one per wait).
+    enum class PairStep : uint8_t {
         IDLE,
-        WAITING_DISCOVER_RESP,  // sent (or re-sent) our own 0x28, waiting for the motor's 0x29
-        // Confirmed required by a second independent reference
-        // (nicolas5000/io-rts-esp32's DiscoverAndPairDevice() - the whole
-        // pairing aborts if this step fails) - inserted here per that
-        // implementation, even though it can't explain why 0x28 itself has
-        // never once been answered on this install (this step only matters
-        // after receiving a 0x29, which has never happened).
-        WAITING_CONFIRM_ACK,    // sent 0x2C, waiting for the motor's 0x2D (up to 3 tries, silence is not fatal)
-        KEY_INIT_PENDING,       // 300 ms pause before the 0x31 (also between key-exchange rounds)
-        SENT_KEY_INIT,          // sent 0x31, waiting for the motor's 0x3C challenge (or an early 0x33)
-        SENT_KEY_TRANSFER,      // sent 0x32 (real system_key, obfuscated), waiting for 0x33
-        BONDED,
-        FAILED,
+        DISCOVERY_DWELL,     // initial dwell on CH2 before the first 0x28
+        DISCOVERY_WAIT,      // 0x28 sent, waiting for a 0x29
+        CONFIRM_WAIT,        // 0x2C sent, waiting for a 0x2D (silence is not an error)
+        KEY_INIT_DELAY,      // pause after the discover-confirm step, before the first 0x31
+        KEY_ROUND_GAP,       // retry gap before the next key-exchange round
+        KEY_CHALLENGE_WAIT,  // 0x31 sent, waiting for the 0x3C (or a direct 0x33)
+        EXCHANGE,            // a send-and-receive of the pairing flow (0x32, 0x50 or 0x6F)
+        ROLL_CALL_WAIT,      // 0x2A sent, collecting 0x2B replies
     };
 
-    enum class CmdState : uint8_t {
-        IDLE,
-        SENT_WAITING_CHALLENGE,   // command sent, waiting for the motor's 0x3C
-        ANSWERED_WAITING_ACK,     // 0x3D sent, waiting for the motor's 0x04 answer
-    };
+    enum class PairJob : uint8_t { NONE, DISCOVER_AND_PAIR, PAIR_BY_ADDRESS, SCAN };
 
-    // Passive key-sniffing (Findings 27/28) - completely independent of
-    // this bridge's own bonding attempt_ FSM above. Watches ALL 2W traffic
-    // (any source/destination) for a real KEY_INIT(0x31)->
-    // CHALLENGE_REQUEST(0x3C)->KEY_TRANSFER(0x32) sequence between two
-    // OTHER devices (e.g. TaHoma bonding with a motor), to recover that
-    // controller's real per-installation system_key. EXPERIMENTAL/
-    // diagnostic tool - not used by any of this bridge's own normal
-    // operation (bonding, control, passive position decode).
+    // Passive key-sniffing (Findings 27/28): watches 2W traffic for a
+    // KEY_INIT(0x31) -> CHALLENGE_REQUEST(0x3C) -> KEY_TRANSFER(0x32) sequence
+    // between two OTHER devices (e.g. TaHoma pairing a motor).
     enum class SniffState : uint8_t {
-        IDLE,             // armed, but haven't seen a KEY_INIT yet
-        SAW_KEY_INIT,     // saw 0x31 box->device, waiting for matching 0x3C device->box
-        SAW_CHALLENGE,    // saw matching 0x3C, waiting for matching 0x32 box->device
+        IDLE,
+        SAW_KEY_INIT,
+        SAW_CHALLENGE,
     };
 
-    // Per-motor bonded session. Keyed by the motor's real (packed) 2W
-    // address, NOT this bridge's own 1W node/key identity for the same
-    // physical cover - those are two completely separate identities/trust
-    // relationships, same distinction IOHCCover already documents between
-    // node/key and motor_address.
+    // The board's quiet level per channel (laberning's ChannelQuietLevel): a
+    // histogram of idle RSSI readings, median per channel, halved after
+    // QUIET_LEVEL_HALVING_READINGS readings.
+    class ChannelQuietLevel {
+    public:
+        void add_reading(uint32_t freq_hz, int16_t level_dbm);
+        std::optional<int16_t> quiet_level_dbm(uint32_t freq_hz) const;
+        // The lowest channel quiet level, once every channel has enough readings.
+        std::optional<int16_t> board_quiet_level_dbm() const;
+
+    private:
+        static constexpr int16_t MIN_DBM = -130;
+        static constexpr int16_t MAX_DBM = -60;
+        struct Channel {
+            std::array<uint16_t, MAX_DBM - MIN_DBM + 1> bins{};
+            uint16_t count{0};
+            void halve();
+        };
+        static std::optional<size_t> channel_index(uint32_t freq_hz);
+        std::array<Channel, 3> channels_{};
+    };
+
+    // Per-motor state of a Two-Way cover (laberning's IoDevice fields that the
+    // command path reads and writes), keyed by the motor's 2W address.
     struct Session2W {
-        bool bonded{false};
-        // The real, per-installation system_key (see Finding 20), copied
-        // in from IOHCController2W::system_key_ once bonding completes.
-        // Every motor bonded to this controller shares the SAME key -
-        // system_key is a controller/hub-level secret, not per-motor - but
-        // it's still stored per-session for a simple, uniform lookup at
-        // per-command answer time (Session2W is already keyed by motor).
-        uint8_t key[16]{};
-        uint8_t last_sent_cmd{0};
-        std::vector<uint8_t> last_sent_data;
-        CmdState cmd_state{CmdState::IDLE};
-        uint32_t cmd_sent_ms{0};
-        // Set by send_command() for the duration of one in-flight command
-        // only - used to route the eventual 0x04 answer's real position back
-        // to the cover that asked for it, via update_real_position_authoritative()
-        // (Phase 3d, distinct from the existing passive-only
-        // update_real_position() - this path is actively solicited and
-        // authenticated via the live challenge/response, so it's allowed to
-        // touch the cover's real position/state, unlike unvalidated passive
-        // decode - see Finding 10's rule).
-        esphome::iohc::IOHCCover *pending_cmd_cover{nullptr};
+        esphome::iohc::IOHCCover *cover{nullptr};
+        bool low_power{false};
+        // Wake belief evidence (decisions::TargetEvidence).
+        uint32_t last_moving_evidence_ms{0};
+        uint32_t moving_until_ms{0};
+        uint32_t last_status_ms{0};
+        bool confirms_execute{false};
+        bool reports_remaining_time{false};
+        // A command waiting for the radio (one exchange at a time).
+        bool command_pending{false};
+        uint8_t pending_main0{0};
+        uint8_t pending_main1{0};
+        // Status polling (StatusPollPolicy's PollTracking).
+        uint32_t next_poll_ms{0};      // 0 = no poll planned
+        uint32_t poll_deadline_ms{0};  // end of the tracked follow-up window
+        bool settling_read{false};     // the next poll decides where the motor ended up
+        bool stop_settle{false};
+        uint8_t status_poll_failures{0};
+        uint8_t auth_poll_failures{0};
     };
 
-    // The box/controller role - one shared instance per bridge (see
-    // esphome::iohc::IOHCComponent::controller2w()), not one per cover the
-    // way IOHCRemote1W is: a single 2W controller identity can be bonded to
-    // many motors, exactly like TaHoma itself is one box serving 14
-    // shutters. Owns the bonding FSM (one attempt at a time - bonding is a
-    // deliberate, user-supervised action, not concurrent background work)
-    // and a per-motor Session2W map for anything already bonded.
     class IOHCController2W {
     public:
-        // owner is used only to request the bridge-wide fast RX hop for the
-        // duration of a bonding attempt (Finding 32, set_bonding_hop_wanted())
-        // - may be nullptr in contexts that don't need that (e.g. tests).
-        // fixed_controller_hex/fixed_system_key_hex: optional, YAML-provided
-        // identity - leave both empty to keep the default random-generate-
-        // and-persist-on-device behavior (see iohc/__init__.py's
-        // controller_address/system_key config comment for the same
-        // survives-a-board-replacement rationale already used for each
-        // cover's own node/key).
+        // fixed_controller_hex/fixed_system_key_hex: the YAML identity
+        // (controller_address/system_key); empty = generate and persist once.
         void begin(iohcRadio *radio, esphome::iohc::IOHCComponent *owner, const std::string &fixed_controller_hex = "",
                    const std::string &fixed_system_key_hex = "");
 
-        // Timeout/delayed-send draining only - see iohc_controller2w.cpp's
-        // loop() for why this exists instead of wiring iohcRadio's own
-        // `delayed` field (deliberate choice, see the plan file's Phase 3
-        // "delayed field decision" section).
         void loop();
 
-        // Called from esphome::iohc::IOHCComponent::on_receive() for every
-        // 2W frame. Returns true if this class consumed the frame (either
-        // routed to the in-progress bonding attempt, or to an in-flight
-        // command's challenge/response), false if the caller should keep
-        // treating it as ordinary passive-decode traffic (the existing,
-        // unrelated Tier 1 feature - this must never interfere with that).
+        // Called from IOHCComponent::on_receive() for every frame. Returns true
+        // if the running exchange or a pairing step consumed it.
         bool handle_frame(IOHC::iohcPacket *packet);
 
-        // User-triggered entry point (see esphome::iohc::IOHCCover::press_prog2w()).
-        // Fails fast (logs a warning, no-op) if motor_address is all-zero -
-        // see the header's "scoping DISCOVER matches" rationale in the plan
-        // file: never treat any 0x29 as a match, only one from the specific
-        // motor this cover already claims via its existing motor_address
-        // config. Actively transmits our own 0x28 DISCOVER broadcast on
-        // CH2 (Finding 22 - always CH2 for TX, never hopped) - RX coverage
-        // across CH1/CH2/CH3 comes from the bridge-wide cooperative hop
-        // (Finding 31, esphome::iohc::IOHCComponent::maybe_hop_()), not
-        // anything this class manages itself anymore. The motor must
-        // already be in its physical pairing window (hold PROG on an
-        // existing paired remote first, same as before) for it to answer.
-        void arm_bonding(const IOHC::address &motor_address, esphome::iohc::IOHCCover *cover);
+        // laberning's Discover & Pair: broadcast 0x28, pair whichever device
+        // answers. Put exactly one device in pairing mode first.
+        void discover_and_pair();
 
-        // Phase 3d: sends a real 2W movement command (Open/Close/Position/
-        // Stop, same main-byte formula already confirmed for 1W) to an
-        // already-bonded motor, then waits for the live 0x3C/0x3D challenge/
-        // response before the motor will act on it - matches every real
-        // TaHoma capture of this exchange (io-2w-protocol.md Findings 5-9).
-        // No-op with a warning if the motor isn't bonded yet, or if a
-        // command is already in flight to it. `cover` is used only to route
-        // the eventual real position answer back - see Session2W's
-        // pending_cmd_cover comment.
-        void send_command(const IOHC::address &to, uint8_t main0, uint8_t main1, esphome::iohc::IOHCCover *cover);
+        // laberning's pair_device action: the key exchange straight to a
+        // device a cover declares as its motor_address, without discovery.
+        void pair_device(const std::string &device_id_hex);
 
-        bool is_bonded(const IOHC::address &motor_address) const;
+        // laberning's scan_paired_devices: a 0x2A roll-call under this
+        // bridge's key; every device that holds it answers with a 0x2B.
+        void scan_paired_devices();
 
-        // True while a bonding attempt is waiting for the motor (any state
-        // between the 0x28 and the final 0x33). The hub decodes received
-        // frames during that window regardless of the debug switches.
-        bool bonding_active() const {
-            return attempt_.state == BondState::WAITING_DISCOVER_RESP ||
-                   attempt_.state == BondState::WAITING_CONFIRM_ACK || attempt_.state == BondState::KEY_INIT_PENDING ||
-                   attempt_.state == BondState::SENT_KEY_INIT || attempt_.state == BondState::SENT_KEY_TRANSFER;
-        }
+        // A 2W command (EXECUTE main bytes: Open/Close/Position/Stop) to a
+        // Two-Way cover's motor, under this bridge's system key.
+        void send_command(const IOHC::address &to, bool low_power, uint8_t main0, uint8_t main1,
+                          esphome::iohc::IOHCCover *cover);
 
-        // Passive 2W key sniffing (Findings 27/28/31) - address-agnostic and
-        // hub-scoped: unlike arm_bonding(), does not target one specific
-        // motor. Watches every 2W frame this bridge overhears, from anyone,
-        // addressed to anyone, for the bonding-only KEY_INIT/
-        // CHALLENGE_REQUEST/KEY_TRANSFER sequence, unconditionally, from
-        // handle_frame() - no separate arm/disarm step anymore. Now that RX
-        // coverage across all 3 channels is the bridge-wide default
-        // (Finding 31), there's no reliability cost to running this
-        // continuously. If a complete sequence is
-        // captured, the derived system_key is logged (hex, ESP_LOGW so it's
-        // never missed even with Debug Logging off) - there is no dedicated
-        // HA entity for it.
+        // An idle RSSI reading of the channel the receiver sat on (called on
+        // every QUIET_LEVEL_READING_EVERY_N_HOPS-th hop, as in laberning's hub).
+        void note_idle_reading(uint32_t freq_hz, int16_t level_dbm);
+
+        // True while a pairing attempt, a scan or an exchange runs. The hub
+        // decodes received frames during that time regardless of the debug switches.
+        bool bonding_active() const;
 
     private:
         static uint32_t pack_address(const IOHC::address &addr);
 
         void load_or_generate_identity(const std::string &fixed_controller_hex);
         void load_or_generate_system_key(const std::string &fixed_system_key_hex);
-        void reset_bonding(BondState to_state, const char *reason);
-        void finalize_bonding(const IOHC::address &motor);
         void reset_sniff_state();
 
-        void send_discover();
-        // CMD 0x2C DISCOVER_CONFIRMATION - unicast, EndFrame=0/LowPower=1
-        // (matching nicolas5000/io-rts-esp32's create_discovery_confirmation_request()
-        // exactly, byte-verified against its real source - deliberately
-        // different header flags from every other 2W frame this class
-        // sends, which all use forge_2w_packet()'s EndFrame=1/LowPower=0
-        // defaults).
-        void send_discover_confirmation(const IOHC::address &to, bool low_power);
-        void send_key_init(const IOHC::address &to);
-        void send_key_transfer(const IOHC::address &to, const uint8_t *challenge6);
-        void send_set_config1(const IOHC::address &to);
+        // --- Pairing engine (pairing_engine.cpp) ---
+        bool start_job_(PairJob job, const char *opening);
+        void finish_job_(const char *outcome);
+        void send_discovery_attempt_(uint8_t attempt);
+        void on_discovery_response_(const IOHC::iohcPacket *packet, const uint8_t *data, uint8_t data_len);
+        void send_discover_confirm_(uint8_t try_index);
+        void start_key_round_(uint8_t round);
+        void key_round_failed_();
+        void key_held_();
+        void complete_paired_();
+        void verify_device_holds_key_();
 
-        // Listen-Before-Talk (Finding 22) - checks RSSI is below threshold
-        // before a 2W transmission, backing off briefly and re-checking up
-        // to a bounded number of times; transmits anyway after that (never
-        // blocks forever). Matches home_io_control's proto_timing.h ETSI EN
-        // 300 220 constants. Called from every 2W send_*() below, right
-        // before radio_->send() - centralized here rather than in
-        // forge_2w_packet() since LBT needs the radio in RX/idle state to
-        // read a meaningful RSSI, which is only true immediately before
-        // send, not at packet-construction time.
-        void listen_before_talk();
+        // --- Send-and-receive (exchange_engine.cpp) ---
+        enum class ExchangeFor : uint8_t { KEY_TRANSFER, VERIFY_KEY, SET_CONFIG1, COMMAND, STATUS_READ };
+        enum class ExchangePhase : uint8_t { GAP, WAIT_FIRST, WAIT_FINAL };
+        enum class ExchangeOutcome : uint8_t { SUCCESS_WITH_RESPONSE, SUCCESS_UNCONFIRMED, FAILED };
+        enum class WakeBelief : uint8_t { NONE, ASLEEP, AWAKE, UNKNOWN };
+        struct AttemptPlan {
+            uint8_t max_attempts{3};
+            uint16_t gap_ms{0};
+            uint16_t window_ms{0};
+            uint16_t early_window_ms{0};
+            bool short_lead{false};
+            uint16_t short_lead_window_ms{0};
+            bool bounded_by_attempts{false};
+            uint16_t window_for_attempt(uint8_t attempt, uint8_t attempts) const;
+        };
+        struct Exchange {
+            bool active{false};
+            ExchangeFor what{ExchangeFor::KEY_TRANSFER};
+            ExchangePhase phase{ExchangePhase::GAP};
+            IOHC::address dst{};
+            uint8_t cmd{0};
+            uint8_t data[16]{};
+            uint8_t data_len{0};
+            bool start_frame{false};
+            bool low_power{false};
+            bool wake_up_channels{false};  // pairing frames: CH2 only
+            uint16_t preamble_override{0}; // pairing frames: fixed preamble
+            uint32_t session_freq{0};      // a continuation goes out on this channel
+            AttemptPlan plan;
+            WakeBelief belief{WakeBelief::NONE};
+            uint8_t tries_allowed{0};
+            uint8_t tries{0};
+            uint8_t unconfirmed_tries{0};
+            uint32_t begin_ms{0};
+            uint32_t due_ms{0};
+            uint32_t follow_up_gap_ms{0};
+            uint32_t auth_tail_ms{0};
+            uint32_t request_freq{0};
+            uint32_t previous_freq{0};
+            uint16_t try_preamble{0};
+            bool saw_challenge{false};
+            // Reply of a successful exchange.
+            uint8_t reply_cmd{0};
+            uint8_t reply_data[32]{};
+            uint8_t reply_len{0};
+            // COMMAND / STATUS_READ bookkeeping.
+            bool is_stop{false};
+        } exchange_;
+        bool start_exchange_(ExchangeFor what, const IOHC::address &dst, uint8_t cmd, const uint8_t *data,
+                             uint8_t data_len, bool start_frame, bool low_power, const AttemptPlan &plan,
+                             bool wake_up_channels, uint16_t preamble_override, uint32_t session_freq);
+        void next_try_();
+        void transmit_try_();
+        void answer_challenge_(const uint8_t *challenge6);
+        void try_ended_unconfirmed_();
+        void end_exchange_(ExchangeOutcome outcome);
+        void exchange_done_(ExchangeOutcome outcome);
+        WakeBelief wake_belief_for_(const IOHC::address &dst, bool low_power, bool start_frame, uint8_t cmd,
+                                    bool is_stop, bool state_unknown) const;
+        uint16_t preamble_for_try_(uint8_t try_index) const;
+        AttemptPlan count_plan_(uint8_t tries, bool start_frame) const;
+        AttemptPlan command_plan_(bool low_power, bool repeat_safe, uint32_t tx_ms) const;
+        AttemptPlan settling_plan_(bool low_power, bool short_lead, uint32_t tx_ms) const;
+        AttemptPlan progress_plan_(bool start_frame) const;
+
+        // --- Cover commands and status reads (hub_operations.cpp, hub_status.cpp) ---
+        void run_pending_work_();
+        void run_command_(const IOHC::address &to, Session2W &s);
+        void start_status_read_(const IOHC::address &to, Session2W &s);
+        void command_done_(ExchangeOutcome outcome);
+        void status_read_done_(ExchangeOutcome outcome);
+        void apply_private_response_(Session2W &s, bool trust_position);
+        // Applies a decoded report (status byte, target and current position,
+        // optional remaining time) to the cover and plans the follow-up read.
+        void apply_status_report_(Session2W &s, const IOHC::address &motor, uint8_t status_byte,
+                                  std::optional<uint16_t> target, std::optional<uint16_t> current,
+                                  std::optional<uint16_t> remaining_s, bool trusted_poll);
+
+        // --- Device-originated status updates (hub_status.cpp, challenge_sender()) ---
+        // A 0x71 to this bridge is authenticated first: our 0x3C, the device's
+        // 0x3D checked under the system key, then the 0x72 acknowledgement on
+        // all three channels (the receive channel first), then the update applied.
+        void on_status_update_(const IOHC::iohcPacket *packet, const uint8_t *data, uint8_t data_len);
+        void on_status_update_answer_(const uint8_t *data, uint8_t data_len);
+        struct InboundAuth {
+            bool active{false};
+            IOHC::address src{};
+            uint8_t update[32]{};
+            uint8_t update_len{0};
+            uint8_t challenge[6]{};
+            uint32_t freq{0};
+            uint32_t due_ms{0};
+            uint8_t acks_sent{0};  // 0x72 copies sent after a verified answer (3 in all)
+            std::array<uint32_t, 3> ack_order{};
+        } inbound_;
+        void schedule_poll_failure_(Session2W &s, bool saw_challenge);
+        void begin_status_poll_tracking_(Session2W &s, uint32_t delay_ms);
+
+        // --- Roll-call (roll_call.cpp) ---
+        void send_roll_call_attempt_();
+        void report_roll_call_();
+
+        // --- Channel access and transmission ---
+        enum class ChannelAccessStatus : uint8_t { SENT, CHANNEL_BUSY };
+        int16_t busy_limit_dbm_() const;
+        int16_t measure_channel_level_(uint32_t freq);
+        uint32_t draw_request_channel_(bool wake_up_channels, uint32_t avoid_freq);
+        // A request that opens a session takes a free channel (ADR 0096):
+        // CH2 for a low-power or pairing frame, any of the three otherwise,
+        // backing off while busy; nothing is sent when the access time runs
+        // out busy.
+        ChannelAccessStatus send_with_channel_access_(iohcPacket *packet, uint16_t preamble, bool wake_up_channels,
+                                                      uint32_t previous_freq, uint32_t &out_freq);
+        // A sender that keeps a fixed channel (discovery, roll-call): up to
+        // LBT_MAX_RETRIES checks against the busy limit, then sent anyway.
+        void send_fixed_channel_(iohcPacket *packet, uint32_t freq, uint16_t preamble);
+        // A frame that answers within a session goes out at once on its channel.
+        void send_at_once_(iohcPacket *packet, uint32_t freq, uint16_t preamble);
+        static uint32_t tx_time_ms_(uint16_t preamble, uint8_t frame_len);
+        void listen_on_(uint32_t freq);
+        bool from_device_to_us_(const IOHC::iohcPacket *packet, const IOHC::address &device) const;
+        IOHC::iohcPacket *build_request_(const IOHC::address &dst, uint8_t cmd, const uint8_t *data, uint8_t data_len,
+                                         bool start, bool end, bool low_power) const;
 
         iohcRadio *radio_{};
         esphome::iohc::IOHCComponent *owner_{nullptr};
         ::Preferences identity_prefs_;
         IOHC::address controller_address_{};
-        // Real per-installation secret (Finding 20), generated once via
-        // esp_random() and persisted the same way as controller_address_
-        // above - shared by every motor this controller ever bonds with,
-        // analogous to how one TaHoma box uses one system key across all
-        // 14 shutters on this install.
         uint8_t system_key_[16]{};
+        ChannelQuietLevel quiet_level_;
+        int16_t logged_busy_limit_dbm_{0};
 
-        struct BondAttempt {
-            BondState state{BondState::IDLE};
-            IOHC::address target_motor{};
-            esphome::iohc::IOHCCover *armed_cover{nullptr};
-            uint32_t state_entered_ms{0};
-            // WAITING_DISCOVER_RESP only - re-sending the 0x28 itself
-            // (always on CH2 - see send_discover()). RX coverage across
-            // CH1/CH2/CH3 in between sends comes from the bridge-wide
-            // cooperative hop (Finding 31) - no per-attempt hop state
-            // needed here anymore.
-            uint32_t last_discover_sent_ms{0};
-            uint8_t discover_retries{0};
-            // Sequence bookkeeping (see the timing constants in the .cpp).
-            uint32_t started_ms{0};
-            uint32_t last_tx_ms{0};          // last frame of the current step
-            uint32_t key_init_due_ms{0};     // KEY_INIT_PENDING: when the 0x31 goes out
-            bool target_low_power{false};    // power class from the motor's 0x29 reply
-            uint8_t confirm_tries{0};        // 0x2C sends so far
-            uint8_t key_rounds{0};           // 0x31 rounds started (1-based)
-            uint8_t key_init_sends{0};       // 0x31 sends in this round
-            uint8_t transfer_tries{0};       // 0x32 sends in this round
-            uint8_t challenge[6]{};          // the motor's 0x3C challenge of this round
-        } attempt_;
+        // Pairing context (laberning's pairing::PairingContext).
+        PairJob job_{PairJob::NONE};
+        PairStep step_{PairStep::IDLE};
+        uint32_t step_due_ms_{0};
+        uint32_t job_started_ms_{0};
+        IOHC::address device_{};
+        bool device_known_{false};
+        bool discovery_low_power_{false};
+        bool saw_key_challenge_{false};
+        bool key_refused_{false};
+        uint8_t discovery_attempt_{0};
+        uint8_t confirm_try_{0};
+        uint8_t key_round_{0};
+        uint32_t session_freq_{0};
+
+        struct RollCallResponder {
+            IOHC::address src{};
+            float rssi{0};
+            uint32_t freq{0};
+            uint8_t flags{0};
+            bool has_flags{false};
+        };
+        uint8_t roll_call_attempt_{0};
+        uint32_t roll_call_tx_freq_{0};
+        std::vector<RollCallResponder> roll_call_responders_;
 
         std::unordered_map<uint32_t, Session2W> sessions_;  // keyed by pack_address(motor)
 
         struct KeySniff {
             SniffState state{SniffState::IDLE};
-            IOHC::address box{};      // source of the observed 0x31 (the controller doing the bonding)
-            IOHC::address device{};   // destination of the observed 0x31 (the motor being bonded)
-            uint8_t challenge[6]{};   // captured from the matching 0x3C
+            IOHC::address box{};
+            IOHC::address device{};
+            uint8_t challenge[6]{};
         } sniff_;
     };
 }

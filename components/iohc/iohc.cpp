@@ -15,20 +15,23 @@ static const char *const TAG = "iohc";
 // is layered on top cooperatively via maybe_hop_() below.
 static uint32_t scan_freqs[1] = {CHANNEL2};
 
-// Fast cooperative hop cadence (Finding 31/32) - matches
-// home_io_control/proto_timing.h's own documented ~2.7ms/3-channel idle
-// hop (roughly 900us/channel), only while something has explicitly
-// requested it (see iohc.h's set_manual_hop_wanted()/set_bonding_hop_wanted()).
-// Real achieved rate depends on how fast ESPHome's own loop() cycles on
-// this hardware - this is the target, not a guarantee, since there's no
-// hardware timer backing it (deliberately, see iohc.h).
-static constexpr uint32_t HOP_INTERVAL_US = 900;
-static constexpr uint32_t HOP_CHANNELS[3] = {CHANNEL2, CHANNEL1, CHANNEL3};
-// Discovery replies come back on CH1 or CH3, almost never on the CH2 request
-// channel, so the discovery wait only visits those two.
-static constexpr uint32_t HOP_CHANNELS_DISCOVERY[2] = {CHANNEL1, CHANNEL3};
-// A PREAMBLE state longer than this with no frame behind it is a stale flag.
-static constexpr uint32_t STALE_PREAMBLE_US = 30000;
+// Cooperative hop, only while something has requested it (see iohc.h's
+// set_manual_hop_wanted()/set_bonding_hop_wanted()), with
+// laberning/home_io_control's timing: HOP_TIME_US per channel for the idle
+// listen (proto_timing.h), the SX1276 hop slice for the rotating listens of
+// pairing and the roll-call (sx1276_discovery_hop_slice_ms), and the hold
+// rules of a reception in progress (radio_sx1276.h, radio_preamble_hold.h,
+// radio_interface.h, proto_timing.h).
+static constexpr uint32_t IDLE_HOP_TIME_US = 2700;
+static constexpr uint32_t ROTATING_HOP_SLICE_US = 5000;
+static constexpr uint32_t PREAMBLE_LINGER_DWELL_MS = 15;
+static constexpr uint32_t IDLE_PREAMBLE_HOLD_MS = 30;
+static constexpr uint32_t IDLE_RENEW_REDETECT_MS = 4;
+static constexpr uint32_t IDLE_PREAMBLE_HOLD_CHAIN_MS = 300;
+static constexpr uint32_t RX_HOP_HOLDOFF_US = 12000;
+// A held plan (no hop) clears a PREAMBLE flag that no frame followed after this.
+static constexpr uint32_t STALE_PREAMBLE_MS = 30;
+static constexpr uint8_t QUIET_LEVEL_READING_EVERY_N_HOPS = 10;
 
 void IOHCComponent::setup() {
   ESP_LOGCONFIG(TAG, "Starting IOHC radio (vendored rspaargaren/iohomecontrol stack)...");
@@ -57,21 +60,16 @@ void IOHCComponent::loop() {
 }
 
 void IOHCComponent::maybe_hop_() {
-  // Disabled (CH2 only) unless something explicitly wants it - see iohc.h's
-  // comment on why this isn't the default (Finding 32). The key-extraction
-  // responder never actually hops (its HopPlan::HOLD_FREQ branch below is a
-  // no-op, same as HOLD_REQUEST) - it only wants this function running for
-  // the stale-PREAMBLE recovery check.
   if (!manual_hop_wanted_ && !bonding_hop_wanted_ && !responder_hop_wanted_)
     return;
 
-  uint32_t now = esphome::micros();
+  const uint32_t now = esphome::micros();
+  const uint32_t now_ms = esphome::millis();
   auto state = IOHC::iohcRadio::radioState;
 
-  // While a bonding attempt waits for the 0x29 reply, say how the listening
-  // goes: hops, preambles seen, stuck preambles cleared. One line per 2 s.
+  // While a pairing attempt or scan waits, say how the listening goes: hops,
+  // preambles seen, stuck preambles cleared. One line per 2 s.
   if (bonding_hop_wanted_) {
-    uint32_t now_ms = esphome::millis();
     if (now_ms - hop_stats_ms_ >= 2000) {
       ESP_LOGI(TAG, "Bonding RX: %lu hops, %lu preambles, %lu stuck preambles cleared in the last %lu ms",
                (unsigned long) hop_count_, (unsigned long) preamble_count_, (unsigned long) stale_recoveries_,
@@ -81,52 +79,99 @@ void IOHCComponent::maybe_hop_() {
     }
   }
 
-  // A retune while receiving leaves the chip's PreambleDetect flag latched
-  // and the interrupt is rising-edge only, so a PREAMBLE state that no frame
-  // follows would last forever and freeze the hop on one channel. A real
-  // discovery reply has a preamble of about 14 ms, so 30 ms in PREAMBLE
-  // without a frame behind it is stale: cycle the receiver once.
-  if (state == IOHC::iohcRadio::RadioState::PREAMBLE) {
-    if (!preamble_counted_) {
-      preamble_counted_ = true;
-      preamble_count_++;
-    }
-    if (preamble_since_us_ == 0) {
-      preamble_since_us_ = now;
-    } else if ((now - preamble_since_us_) > STALE_PREAMBLE_US) {
+  // A plan set by a pairing step, scan or exchange wins over the manual
+  // switch while it runs; the manual switch is laberning's idle listening.
+  const HopPlan plan = plan_override_ ? hop_plan_ : (manual_hop_wanted_ ? HopPlan::ALL : hop_plan_);
+  const bool rotating = plan == HopPlan::ALL || plan == HopPlan::SKIP_FREQ;
+  const bool idle_listen = rotating && !plan_override_ && manual_hop_wanted_;
+
+  if (state == IOHC::iohcRadio::RadioState::TX) {
+    sync_since_us_ = 0;
+    return;
+  }
+
+  // A frame whose sync word arrived holds the channel, bounded by
+  // RX_HOP_HOLDOFF_US so a sync with no frame behind it cannot wedge the hop.
+  if (state == IOHC::iohcRadio::RadioState::PAYLOAD) {
+    preamble_hold_active_ = false;
+    awaiting_redetect_ = false;
+    if (sync_since_us_ == 0) {
+      sync_since_us_ = now;
+    } else if (now - sync_since_us_ >= RX_HOP_HOLDOFF_US) {
       IOHC::iohcRadio::getInstance()->recover_rx();
       stale_recoveries_++;
-      preamble_since_us_ = 0;
-      preamble_counted_ = false;
+      sync_since_us_ = 0;
     }
     return;
   }
-  preamble_since_us_ = 0;
-  preamble_counted_ = false;
+  sync_since_us_ = 0;
 
-  // Never hop while a frame is arriving or a TX is in flight.
-  if (state == IOHC::iohcRadio::RadioState::PAYLOAD || state == IOHC::iohcRadio::RadioState::TX) {
-    return;
+  // A preamble on this channel holds it. Rotating listens of pairing and the
+  // roll-call linger PREAMBLE_LINGER_DWELL_MS once; the idle listen holds
+  // IDLE_PREAMBLE_HOLD_MS slices, renewed on the same channel (receiver
+  // restarted, IDLE_RENEW_REDETECT_MS to see the preamble again) up to
+  // IDLE_PREAMBLE_HOLD_CHAIN_MS (laberning's PreambleHold::hold_renewing()).
+  // A held plan only clears a stale flag so it cannot freeze reception.
+  const bool preamble_seen = state == IOHC::iohcRadio::RadioState::PREAMBLE;
+  if (preamble_seen && !preamble_counted_) {
+    preamble_counted_ = true;
+    preamble_count_++;
+  }
+  if (!preamble_seen)
+    preamble_counted_ = false;
+  {
+    const uint32_t slice_ms = idle_listen ? IDLE_PREAMBLE_HOLD_MS : (rotating ? PREAMBLE_LINGER_DWELL_MS : STALE_PREAMBLE_MS);
+    const uint32_t chain_ms = idle_listen ? IDLE_PREAMBLE_HOLD_CHAIN_MS : slice_ms;
+    if (preamble_hold_active_) {
+      if (now_ms - preamble_slice_start_ms_ < slice_ms)
+        return;
+      preamble_hold_active_ = false;
+      // The receiver is restarted on the held channel either way: a retune
+      // leaves the PreambleDetect flag latched.
+      IOHC::iohcRadio::getInstance()->recover_rx();
+      stale_recoveries_++;
+      if (now_ms - preamble_chain_start_ms_ < chain_ms) {
+        awaiting_redetect_ = true;
+        redetect_since_ms_ = now_ms;
+        return;
+      }
+      awaiting_redetect_ = false;
+    } else if (preamble_seen) {
+      preamble_hold_active_ = true;
+      preamble_slice_start_ms_ = now_ms;
+      if (!awaiting_redetect_)
+        preamble_chain_start_ms_ = now_ms;
+      awaiting_redetect_ = false;
+      return;
+    } else if (awaiting_redetect_) {
+      if (now_ms - redetect_since_ms_ < IDLE_RENEW_REDETECT_MS)
+        return;
+      awaiting_redetect_ = false;
+    }
   }
 
-  // Which channels to visit. The manual switch always sweeps all three; an
-  // armed bonding attempt or key-extraction session follows its plan (see
-  // HopPlan).
-  HopPlan plan = manual_hop_wanted_ ? HopPlan::ALL : hop_plan_;
-  if (plan == HopPlan::HOLD_REQUEST || plan == HopPlan::HOLD_FREQ)
+  if (!rotating)
     return;
-  if ((now - last_hop_us_) < HOP_INTERVAL_US)
+  // Dwell per channel: laberning's HOP_TIME_US for the idle listen, the
+  // SX1276 hop slice for a rotating listen of pairing and the roll-call.
+  const uint32_t dwell_us = idle_listen ? IDLE_HOP_TIME_US : ROTATING_HOP_SLICE_US;
+  if ((now - last_hop_us_) <= dwell_us)
     return;
   last_hop_us_ = now;
-  uint32_t freq;
-  if (plan == HopPlan::DISCOVERY) {
-    hop_channel_idx_ = (hop_channel_idx_ + 1) % 2;
-    freq = HOP_CHANNELS_DISCOVERY[hop_channel_idx_];
-  } else {
-    hop_channel_idx_ = (hop_channel_idx_ + 1) % 3;
-    freq = HOP_CHANNELS[hop_channel_idx_];
+  // laberning's rotation: CH2 -> CH3 -> CH1 -> CH2, skipping `skip_freq_`.
+  uint32_t freq = hop_freq_;
+  do {
+    freq = freq == CHANNEL1 ? CHANNEL2 : (freq == CHANNEL3 ? CHANNEL1 : CHANNEL3);
+  } while (plan == HopPlan::SKIP_FREQ && freq == skip_freq_);
+  // The receiver has sat on the channel it leaves for the whole dwell: one
+  // idle reading of it every QUIET_LEVEL_READING_EVERY_N_HOPS hops teaches
+  // the 2W channel access this board's quiet level.
+  if (++hops_since_reading_ >= QUIET_LEVEL_READING_EVERY_N_HOPS) {
+    hops_since_reading_ = 0;
+    controller2w_.note_idle_reading(hop_freq_, static_cast<int16_t>(Radio::readRssi()));
   }
   hop_count_++;
+  hop_freq_ = freq;
   IOHC::iohcRadio::getInstance()->retune(freq);
 }
 
@@ -135,7 +180,7 @@ void IOHCComponent::hop_wanted_changed_() {
   // many times a second, to catch a discovery reply): the key-extraction
   // responder sits on one channel throughout and only needs maybe_hop_()
   // running at the ordinary loop() rate for its stale-PREAMBLE check.
-  if (bonding_hop_wanted_) {
+  if (bonding_hop_wanted_ || manual_hop_wanted_) {
     high_freq_loop_.start();
   } else {
     high_freq_loop_.stop();
@@ -145,21 +190,38 @@ void IOHCComponent::hop_wanted_changed_() {
     // than waiting for the next (now-disabled) hop tick to happen to land
     // there.
     IOHC::iohcRadio::getInstance()->retune(CHANNEL2);
+    hop_freq_ = CHANNEL2;
     hop_plan_ = HopPlan::ALL;
-    preamble_since_us_ = 0;
+    plan_override_ = false;
+    preamble_hold_active_ = false;
+    awaiting_redetect_ = false;
     preamble_counted_ = false;
   }
 }
 
-void IOHCComponent::set_hop_plan(HopPlan plan, uint32_t hold_freq) {
+void IOHCComponent::set_hop_plan(HopPlan plan, uint32_t freq) {
   hop_plan_ = plan;
-  if (manual_hop_wanted_)
-    return;  // the manual switch always sweeps all three regardless.
+  plan_override_ = true;
+  if (plan == HopPlan::SKIP_FREQ)
+    skip_freq_ = freq != 0 ? freq : CHANNEL2;
   if (plan == HopPlan::HOLD_REQUEST) {
     IOHC::iohcRadio::getInstance()->retune(CHANNEL2);
+    hop_freq_ = CHANNEL2;
   } else if (plan == HopPlan::HOLD_FREQ) {
-    hold_freq_ = hold_freq != 0 ? hold_freq : CHANNEL2;
+    hold_freq_ = freq != 0 ? freq : CHANNEL2;
     IOHC::iohcRadio::getInstance()->retune(hold_freq_);
+    hop_freq_ = hold_freq_;
+  }
+}
+
+void IOHCComponent::release_hop_plan() {
+  // Back to idle listening: the manual switch's rotation when it is on,
+  // CH2 otherwise.
+  plan_override_ = false;
+  hop_plan_ = HopPlan::ALL;
+  if (!manual_hop_wanted_ && !bonding_hop_wanted_) {
+    IOHC::iohcRadio::getInstance()->retune(CHANNEL2);
+    hop_freq_ = CHANNEL2;
   }
 }
 

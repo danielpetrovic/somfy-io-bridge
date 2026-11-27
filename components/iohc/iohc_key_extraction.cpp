@@ -114,6 +114,7 @@ void IOHCKeyExtractor::set_armed(bool armed) {
         state_ = ResponderState::DISARMED;
         discover_reply_pending_ = false;
         if (owner_ != nullptr) {
+            owner_->release_hop_plan();
             owner_->set_responder_hop_wanted(false);
         }
         ESP_LOGI(TAG, "Recover System Key: disarmed");
@@ -159,7 +160,7 @@ void IOHCKeyExtractor::send_reply_(iohcPacket *packet) {
     // An answer to a frame addressed to us goes out at once on the session
     // channel, without listen-before-talk or the radio's inter-send gap
     // (laberning/home_io_control's responder does the same).
-    packet->in_session_reply = true;
+    packet->skip_send_gap = true;
     radio_->retune(session_freq_);
     radio_->send(packet);
 }

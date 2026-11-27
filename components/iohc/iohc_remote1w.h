@@ -94,7 +94,7 @@ namespace IOHC {
         // already triggers extra cover-state logic beyond a raw command.
         // Named to match Prog above (same 1:1 relationship as "Program (2W)"
         // is to "Program") rather than introducing new vocabulary at this
-        // layer - see IOHCCover::press_prog2w() / IOHC::IOHCController2W::arm_bonding().
+        // layer - see IOHCCover::press_prog2w() / IOHC::IOHCController2W::discover_and_pair().
         Prog2W,
         // "Set My" button's entry point (GitHub issue #1) - reprograms the
         // motor's own stored My/favorite position (height, and tilt where
