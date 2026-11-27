@@ -25,7 +25,7 @@ esphome:
   min_version: 2026.11.0
   project:
     name: "danielpetrovic.Somfy IO Bridge"
-    version: "1.0.2-2w9"
+    version: "1.0.2-2w10"
   # The vendored radio stack talks to the SX1276 directly via Arduino's SPI
   # library, and the Phase 2 pairing/command layer persists bonded remote
   # identities via Arduino's Preferences (NVS) library. Neither gets picked

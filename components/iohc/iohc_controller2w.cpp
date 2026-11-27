@@ -171,10 +171,10 @@ namespace IOHC {
         return !(state == 2 || state == 3 || state == 4);
     }
 
-    // interval_ms: the cover's Status Poll Interval (laberning's
-    // status_poll_interval); 0 falls back to the default.
-    static uint32_t settle_delay_ms(uint32_t interval_ms, uint32_t remaining_delay_ms, bool cap_for_stop) {
-        uint32_t delay = interval_ms != 0 ? interval_ms : DEFAULT_SETTLE_POLL_DELAY_MS;
+    // laberning's status_poll_interval at its default (3 s), shortened by the
+    // motor's own remaining-time count and capped after a stop.
+    static uint32_t settle_delay_ms(uint32_t remaining_delay_ms, bool cap_for_stop) {
+        uint32_t delay = DEFAULT_SETTLE_POLL_DELAY_MS;
         if (remaining_delay_ms != 0)
             delay = std::min(delay, remaining_delay_ms);
         if (cap_for_stop)
@@ -590,8 +590,8 @@ namespace IOHC {
         iohcPacket *packet = build_request_(x.dst, x.cmd, x.data, x.data_len, x.start_frame, false, x.low_power);
         const uint8_t frame_len = packet->buffer_length;
         const uint32_t window = x.plan.window_for_attempt(x.tries, x.tries_allowed);
-        // The wait state is set before the frame goes out: the reply arrives on
-        // the receive task, possibly before this function returns.
+        // The wait state is set before the frame goes out (replies are handled
+        // on the main loop, after this function returns).
         x.phase = ExchangePhase::WAIT_FIRST;
         x.due_ms = esphome::millis() + 0x7FFFFFFF;
         if (x.start_frame) {
@@ -1113,8 +1113,7 @@ namespace IOHC {
         s.auth_poll_failures = 0;
         s.stop_settle = exchange_.is_stop;
         s.settling_read = true;
-        begin_status_poll_tracking_(
-            s, settle_delay_ms(s.cover != nullptr ? s.cover->get_status_poll_interval_ms() : 0, 0, exchange_.is_stop));
+        begin_status_poll_tracking_(s, settle_delay_ms(0, exchange_.is_stop));
     }
 
     void IOHCController2W::begin_status_poll_tracking_(Session2W &s, uint32_t delay_ms) {
@@ -1243,8 +1242,7 @@ namespace IOHC {
         if (trusted_poll) s.settling_read = remaining_s.has_value();
         const uint32_t remaining_delay_ms =
             remaining_s.has_value() ? (*remaining_s * 1000u) + PRIVATE_RESPONSE_REMAINING_TIME_BIAS_MS : 0;
-        const uint32_t delay_ms =
-            settle_delay_ms(s.cover != nullptr ? s.cover->get_status_poll_interval_ms() : 0, remaining_delay_ms, false);
+        const uint32_t delay_ms = settle_delay_ms(remaining_delay_ms, false);
         const uint32_t next = now + delay_ms;
         // A status update only moves a planned poll earlier, never later.
         if (trusted_poll || s.next_poll_ms == 0 || time_reached(s.next_poll_ms, next)) s.next_poll_ms = next;

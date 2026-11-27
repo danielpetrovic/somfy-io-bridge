@@ -9,7 +9,7 @@ namespace iohc {
 
 // Which per-cover travel-time value this number instance controls - same
 // one-class-many-types dispatch pattern as IOHCConfigSwitch/RemoteButton.
-enum class ConfigNumberType : uint8_t { TRAVEL_TIME_OPEN, TRAVEL_TIME_CLOSE, STATUS_POLL_INTERVAL };
+enum class ConfigNumberType : uint8_t { TRAVEL_TIME_OPEN, TRAVEL_TIME_CLOSE };
 
 class IOHCConfigNumber : public number::Number, public Component {
  public:

@@ -17,6 +17,9 @@
 #include "iohcRadio.h"
 #include "iohc_controller2w.h"
 #include "iohc_key_extraction.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -32,6 +35,10 @@ class IOHCComponent : public Component {
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::HARDWARE; }
 
+  // Called on the radio stack's CallbackTask: only queues a copy of the
+  // frame. Every frame is handled on the main loop (process_frame_()), like
+  // laberning/home_io_control's loop() reading the radio itself, so the 2W
+  // state, the covers and their HA entities are only ever touched by one task.
   bool on_receive(IOHC::iohcPacket *packet);
 
   // Passive 2W status: every cover registers itself in setup() so that a
@@ -110,6 +117,13 @@ class IOHCComponent : public Component {
   bool status_feedback_available() const;
 
  protected:
+  void process_frame_(IOHC::iohcPacket *packet);
+  void drain_received_frames_();
+  // Frames received on the CallbackTask, waiting for the main loop.
+  static constexpr UBaseType_t RX_QUEUE_DEPTH = 16;
+  QueueHandle_t rx_queue_{nullptr};
+  std::atomic<uint32_t> rx_dropped_{0};
+  uint32_t rx_dropped_reported_{0};
   void maybe_hop_();
   HopPlan hop_plan_{HopPlan::ALL};
   uint32_t hold_freq_{CHANNEL2};

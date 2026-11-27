@@ -3,6 +3,7 @@
 #include "esphome/core/hal.h"
 #include "cover/iohc_cover.h"
 #include "esp_timer.h"
+#include <type_traits>
 
 namespace esphome {
 namespace iohc {
@@ -32,8 +33,17 @@ static constexpr uint32_t RX_HOP_HOLDOFF_US = 12000;
 static constexpr uint32_t STALE_PREAMBLE_MS = 30;
 static constexpr uint8_t QUIET_LEVEL_READING_EVERY_N_HOPS = 10;
 
+// A frame is queued by value (see on_receive()).
+static_assert(std::is_trivially_copyable<IOHC::iohcPacket>::value, "iohcPacket is queued by value");
+
 void IOHCComponent::setup() {
   ESP_LOGCONFIG(TAG, "Starting IOHC radio (vendored rspaargaren/iohomecontrol stack)...");
+  rx_queue_ = xQueueCreate(RX_QUEUE_DEPTH, sizeof(IOHC::iohcPacket));
+  if (rx_queue_ == nullptr) {
+    ESP_LOGE(TAG, "Cannot create the receive queue");
+    this->mark_failed();
+    return;
+  }
   IOHC::IohcPacketDelegate rx_cb(&IOHCComponent::on_receive, this);
   IOHC::iohcRadio::getInstance()->start(1, scan_freqs, 0, rx_cb, nullptr);
   // The idle listening hops every 2.7 ms, faster than ESPHome's normal loop.
@@ -43,6 +53,9 @@ void IOHCComponent::setup() {
 }
 
 void IOHCComponent::loop() {
+  // Received frames first: a reply that has arrived wins over the timeout of
+  // the try it answers.
+  drain_received_frames_();
   // Bonding-attempt timeouts and per-command timeouts - see
   // iohc_controller2w.cpp's loop().
   controller2w_.loop();
@@ -199,6 +212,25 @@ void IOHCComponent::set_bonding_hop_wanted(bool wanted) { bonding_hop_wanted_ = 
 void IOHCComponent::set_responder_hop_wanted(bool wanted) { responder_hop_wanted_ = wanted; }
 
 bool IOHCComponent::on_receive(IOHC::iohcPacket *packet) {
+  // CallbackTask: the radio stack deletes the packet after this returns, so
+  // a copy goes into the queue.
+  if (rx_queue_ == nullptr || xQueueSendToBack(rx_queue_, packet, 0) != pdPASS)
+    rx_dropped_.fetch_add(1, std::memory_order_relaxed);
+  return true;
+}
+
+void IOHCComponent::drain_received_frames_() {
+  IOHC::iohcPacket packet;
+  while (xQueueReceive(rx_queue_, &packet, 0) == pdPASS)
+    process_frame_(&packet);
+  const uint32_t dropped = rx_dropped_.load(std::memory_order_relaxed);
+  if (dropped != rx_dropped_reported_) {
+    ESP_LOGW(TAG, "Receive queue full: %lu frames dropped since boot", static_cast<unsigned long>(dropped));
+    rx_dropped_reported_ = dropped;
+  }
+}
+
+void IOHCComponent::process_frame_(IOHC::iohcPacket *packet) {
   this->packets_received_++;
 
   ESP_LOGD(TAG, "Frame #%lu received, length=%u, rssi=%.1f dBm", this->packets_received_, packet->buffer_length,
@@ -279,8 +311,6 @@ bool IOHCComponent::on_receive(IOHC::iohcPacket *packet) {
                              static_cast<float>(packet->afc));
     }
   }
-
-  return true;
 }
 
 bool IOHCComponent::status_feedback_available() const {

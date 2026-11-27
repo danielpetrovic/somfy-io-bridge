@@ -70,7 +70,6 @@ void IOHCCover::setup() {
   travel_time_open_ = cover_prefs_.getUInt("travel_open", travel_time_open_default_);
   travel_time_close_ = cover_prefs_.getUInt("travel_close", travel_time_close_default_);
   apply_travel_times_();
-  status_poll_interval_ms_ = cover_prefs_.getUInt("poll_interval", 3000);
 
   // Restore last known position (defaults to open if never set). Persisted
   // "position" is always HA-space (see control()/loop()'s own comments) -
@@ -285,11 +284,6 @@ void IOHCCover::set_travel_time_close(uint32_t seconds) {
   travel_time_close_ = seconds;
   cover_prefs_.putUInt("travel_close", seconds);
   apply_travel_times_();
-}
-
-void IOHCCover::set_status_poll_interval_ms(uint32_t ms) {
-  status_poll_interval_ms_ = ms;
-  cover_prefs_.putUInt("poll_interval", ms);
 }
 
 void IOHCCover::apply_travel_times_() {

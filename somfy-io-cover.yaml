@@ -225,19 +225,6 @@ number:
     cover_id: ${cover_id}
     type: travel_time_close
     entity_category: config
-  # Two-Way mode only: seconds between reads of the motor's real position
-  # while it moves, and before the first read after a command (default 3 s).
-  # Each read is a full 2W exchange during which the radio hears nothing
-  # else, and a battery motor needs the wake-up preamble for each one, so
-  # short intervals only suit mains-powered motors.
-  - platform: iohc
-    id: ${cover_id}_status_poll_interval
-    name: "Status Poll Interval (2W)"
-    icon: mdi:timer-sync-outline
-    device_id: ${cover_id}_device
-    cover_id: ${cover_id}
-    type: status_poll_interval
-    entity_category: config
 
 sensor:
   # This bridge's own signal strength for the last frame heard from this
