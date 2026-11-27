@@ -237,19 +237,3 @@ sensor:
     cover_id: ${cover_id}
     type: rssi
     entity_category: diagnostic
-  # Confirm and resend counters since boot (see the bridge's "Confirm And
-  # Resend (2W)" switch): commands that had to be sent again because no
-  # matching motor status was heard, and commands still unconfirmed after the
-  # last resend. HA can notify when Failed Commands goes up.
-  - platform: iohc
-    id: ${cover_id}_resends
-    name: "Resends"
-    device_id: ${cover_id}_device
-    cover_id: ${cover_id}
-    type: resends
-  - platform: iohc
-    id: ${cover_id}_failed_commands
-    name: "Failed Commands"
-    device_id: ${cover_id}_device
-    cover_id: ${cover_id}
-    type: failed_commands

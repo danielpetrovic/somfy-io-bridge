@@ -6,7 +6,6 @@
   sensors, which reflect TaHoma's radio, not this board's - see
   IOHCCover::update_last_rssi() in cover/iohc_cover.cpp. Requires
   motor_address to be set on the cover.
-- `resends`, `failed_commands`: the Confirm And Resend counters.
 
 The former `target_closure` type is removed: a Two-Way cover reports its real
 position itself, and Confirm And Resend takes the overheard current position
@@ -22,7 +21,6 @@ from esphome.const import (
     DEVICE_CLASS_SIGNAL_STRENGTH,
     ENTITY_CATEGORY_DIAGNOSTIC,
     STATE_CLASS_MEASUREMENT,
-    STATE_CLASS_TOTAL_INCREASING,
     UNIT_DECIBEL_MILLIWATT,
 )
 
@@ -34,8 +32,6 @@ DEPENDENCIES = ["iohc"]
 CONF_COVER_ID = "cover_id"
 
 TYPE_RSSI = "rssi"
-TYPE_RESENDS = "resends"
-TYPE_FAILED = "failed_commands"
 
 # expire_after: the RSSI sensor is not pushed on a fixed schedule - it only
 # updates when a frame happens to be overheard - so with no expiry it would
@@ -49,19 +45,6 @@ TYPE_FAILED = "failed_commands"
 _EXPIRE_AFTER_DEFAULT = "90min"
 
 SENSOR_SCHEMAS = {
-    # Commands that had to be sent again / were still unconfirmed after the
-    # last resend, counted since boot (confirm-and-resend, see iohc_cover.h).
-    # No expire_after: a counter that sits still is not stale.
-    TYPE_RESENDS: sensor.sensor_schema(
-        accuracy_decimals=0,
-        state_class=STATE_CLASS_TOTAL_INCREASING,
-        entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-    ),
-    TYPE_FAILED: sensor.sensor_schema(
-        accuracy_decimals=0,
-        state_class=STATE_CLASS_TOTAL_INCREASING,
-        entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
-    ),
     TYPE_RSSI: sensor.sensor_schema(
         unit_of_measurement=UNIT_DECIBEL_MILLIWATT,
         accuracy_decimals=1,
@@ -89,7 +72,3 @@ async def to_code(config):
     cover_var = await cg.get_variable(config[CONF_COVER_ID])
     if config[CONF_TYPE] == TYPE_RSSI:
         cg.add(cover_var.set_last_rssi_sensor(var))
-    elif config[CONF_TYPE] == TYPE_RESENDS:
-        cg.add(cover_var.set_resends_sensor(var))
-    elif config[CONF_TYPE] == TYPE_FAILED:
-        cg.add(cover_var.set_failed_sensor(var))

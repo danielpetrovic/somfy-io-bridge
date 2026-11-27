@@ -214,20 +214,12 @@ void IOHCCover::check_confirmation_() {
     return;
   }
   if (pending_resends_ >= MAX_RESENDS) {
-    failed_count_++;
-    if (failed_sensor_ != nullptr) {
-      failed_sensor_->publish_state(failed_count_);
-    }
     ESP_LOGW(TAG, "%s: command not confirmed after %u resend(s), expected %.0f%% closed. Giving up.",
              LOG_STR_ARG(this->get_log_name()), static_cast<unsigned>(pending_resends_), pending_expected_closure_);
     confirm_pending_ = false;
     return;
   }
   pending_resends_++;
-  resend_count_++;
-  if (resends_sensor_ != nullptr) {
-    resends_sensor_->publish_state(resend_count_);
-  }
   ESP_LOGI(TAG, "%s: no matching status within %.0f s, sending the command again (resend %u of %u)",
            LOG_STR_ARG(this->get_log_name()), (now - pending_sent_ms_) / 1000.0f,
            static_cast<unsigned>(pending_resends_), static_cast<unsigned>(MAX_RESENDS));
