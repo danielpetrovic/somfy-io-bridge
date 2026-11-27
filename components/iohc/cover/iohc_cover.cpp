@@ -70,6 +70,7 @@ void IOHCCover::setup() {
   travel_time_open_ = cover_prefs_.getUInt("travel_open", travel_time_open_default_);
   travel_time_close_ = cover_prefs_.getUInt("travel_close", travel_time_close_default_);
   apply_travel_times_();
+  status_poll_interval_ms_ = cover_prefs_.getUInt("poll_interval", 3000);
 
   // Restore last known position (defaults to open if never set). Persisted
   // "position" is always HA-space (see control()/loop()'s own comments) -
@@ -104,8 +105,8 @@ bool IOHCCover::motor_matches(const uint8_t *source) const {
   return has_motor_address_ && memcmp(motor_address_, source, sizeof(IOHC::address)) == 0;
 }
 
-void IOHCCover::on_status_heard(float closure_percent, bool position_valid, uint8_t status, bool commander_is_ours,
-                                float rssi_dbm, float afc_hz) {
+void IOHCCover::on_status_heard(float target_closure, bool target_valid, float current_closure, bool current_valid,
+                                bool stopped, uint8_t status, bool commander_is_ours, float rssi_dbm, float afc_hz) {
   uint32_t last_cmd = remote_.last_cmd_ms();
   uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
   char age[32];
@@ -114,47 +115,47 @@ void IOHCCover::on_status_heard(float closure_percent, bool position_valid, uint
   } else {
     snprintf(age, sizeof(age), "%.1f s after our last command", (now - last_cmd) / 1000.0f);
   }
-  if (position_valid) {
-    ESP_LOGI(TAG, "%s: status heard, closure=%.0f%% status=0x%02X commander=%s, %.1f dBm, afc %+.0f Hz, %s",
-             LOG_STR_ARG(this->get_log_name()), closure_percent, status, commander_is_ours ? "us" : "other",
-             rssi_dbm, afc_hz, age);
+  char target_text[16];
+  if (target_valid) {
+    snprintf(target_text, sizeof(target_text), "%.0f%%", target_closure);
   } else {
-    ESP_LOGI(TAG, "%s: status heard, no position (last command was not a move) status=0x%02X commander=%s, "
-                  "%.1f dBm, afc %+.0f Hz, %s",
-             LOG_STR_ARG(this->get_log_name()), status, commander_is_ours ? "us" : "other", rssi_dbm, afc_hz, age);
+    snprintf(target_text, sizeof(target_text), "none");
   }
+  ESP_LOGI(TAG, "%s: status heard, %s, current %.0f%% closed, target %s, status=0x%02X commander=%s, %.1f dBm, "
+                "afc %+.0f Hz, %s",
+           LOG_STR_ARG(this->get_log_name()), stopped ? "stopped" : "moving", current_closure, target_text, status,
+           commander_is_ours ? "us" : "other", rssi_dbm, afc_hz, age);
   update_last_rssi(rssi_dbm);
-  if (!position_valid) {
-    return;
-  }
-  closure_percent = std::clamp(closure_percent, 0.0f, 100.0f);
-  // Not persisted: after a restart the sensor stays unavailable until a real
-  // answer is heard, so an old value is never shown as current.
-  if (target_closure_sensor_ != nullptr) {
-    target_closure_sensor_->publish_state(closure_percent);
-  }
 
   if (!parent_->confirm_resend_wanted() || mode_ != Mode::POSITION) {
     return;
   }
 
-  // Confirmation: the motor is where the last command sent it. The cover
-  // already shows that target, so nothing else to do.
-  if (confirm_pending_ && std::fabs(closure_percent - pending_expected_closure_) <= CONFIRM_TOLERANCE) {
-    ESP_LOGI(TAG, "%s: command confirmed, motor at %.0f%% closed, %.1f s after the first send, %u resend(s)",
-             LOG_STR_ARG(this->get_log_name()), closure_percent, (now_ms() - pending_first_ms_) / 1000.0f,
-             static_cast<unsigned>(pending_resends_));
-    confirm_pending_ = false;
-    return;
+  // Confirmation: the motor took the last command, its target is where that
+  // command sent it (while it still travels, too). The cover already shows
+  // that target, so nothing else to do.
+  if (target_valid) {
+    target_closure = std::clamp(target_closure, 0.0f, 100.0f);
+    if (confirm_pending_ && std::fabs(target_closure - pending_expected_closure_) <= CONFIRM_TOLERANCE) {
+      ESP_LOGI(TAG, "%s: command confirmed, motor target %.0f%% closed, %.1f s after the first send, %u resend(s)",
+               LOG_STR_ARG(this->get_log_name()), target_closure, (now_ms() - pending_first_ms_) / 1000.0f,
+               static_cast<unsigned>(pending_resends_));
+      confirm_pending_ = false;
+      return;
+    }
   }
 
-  // Adopting the real position. Only here is the heard position allowed to
-  // change this cover: the hub matched the frame on a 24 bit address (the
-  // commander or the motor address), which a garbled frame will not hit by
-  // chance. Not while a command is waiting for its confirmation (a resend is
-  // pending), not while the cover is moving, and not until the motor has
-  // surely stopped after our last command: an answer from mid-travel would
-  // pull the state backwards and might be the last one heard.
+  // Adopting the real position: the motor's current position, once it
+  // reports itself at rest. Only here is the heard position allowed to change
+  // this cover: the hub matched the frame on a 24 bit address (the commander
+  // or the motor address), which a garbled frame will not hit by chance. Not
+  // while a command is waiting for its confirmation (a resend is pending),
+  // not while the cover is moving, and not until the motor has surely stopped
+  // after our last command.
+  if (!current_valid || !stopped) {
+    return;
+  }
+  const float closure_percent = std::clamp(current_closure, 0.0f, 100.0f);
   if (confirm_pending_ || this->current_operation != cover::COVER_OPERATION_IDLE) {
     return;
   }
@@ -284,6 +285,11 @@ void IOHCCover::set_travel_time_close(uint32_t seconds) {
   travel_time_close_ = seconds;
   cover_prefs_.putUInt("travel_close", seconds);
   apply_travel_times_();
+}
+
+void IOHCCover::set_status_poll_interval_ms(uint32_t ms) {
+  status_poll_interval_ms_ = ms;
+  cover_prefs_.putUInt("poll_interval", ms);
 }
 
 void IOHCCover::apply_travel_times_() {

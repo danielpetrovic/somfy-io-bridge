@@ -43,6 +43,17 @@ ConfigNumberType = iohc_ns.enum("ConfigNumberType", is_class=True)
 TYPES = {
     "travel_time_open": ConfigNumberType.TRAVEL_TIME_OPEN,
     "travel_time_close": ConfigNumberType.TRAVEL_TIME_CLOSE,
+    # Two-Way mode: seconds between position reads while the motor moves
+    # (laberning/home_io_control's status_poll_interval, minimum 0.5 s; 3 s
+    # equals its default).
+    "status_poll_interval": ConfigNumberType.STATUS_POLL_INTERVAL,
+}
+
+# min, max, step per type.
+RANGES = {
+    "travel_time_open": (1, 120, 1),
+    "travel_time_close": (1, 120, 1),
+    "status_poll_interval": (0.5, 10, 0.5),
 }
 
 CONFIG_SCHEMA = number.number_schema(
@@ -57,7 +68,8 @@ CONFIG_SCHEMA = number.number_schema(
 
 
 async def to_code(config):
-    var = await number.new_number(config, min_value=1, max_value=120, step=1)
+    min_value, max_value, step = RANGES[config[CONF_TYPE]]
+    var = await number.new_number(config, min_value=min_value, max_value=max_value, step=step)
     await cg.register_component(var, config)
 
     cover_var = await cg.get_variable(config[CONF_COVER_ID])

@@ -171,8 +171,10 @@ namespace IOHC {
         return !(state == 2 || state == 3 || state == 4);
     }
 
-    static uint32_t settle_delay_ms(uint32_t remaining_delay_ms, bool cap_for_stop) {
-        uint32_t delay = DEFAULT_SETTLE_POLL_DELAY_MS;  // no configured interval
+    // interval_ms: the cover's Status Poll Interval (laberning's
+    // status_poll_interval); 0 falls back to the default.
+    static uint32_t settle_delay_ms(uint32_t interval_ms, uint32_t remaining_delay_ms, bool cap_for_stop) {
+        uint32_t delay = interval_ms != 0 ? interval_ms : DEFAULT_SETTLE_POLL_DELAY_MS;
         if (remaining_delay_ms != 0)
             delay = std::min(delay, remaining_delay_ms);
         if (cap_for_stop)
@@ -1111,7 +1113,8 @@ namespace IOHC {
         s.auth_poll_failures = 0;
         s.stop_settle = exchange_.is_stop;
         s.settling_read = true;
-        begin_status_poll_tracking_(s, settle_delay_ms(0, exchange_.is_stop));
+        begin_status_poll_tracking_(
+            s, settle_delay_ms(s.cover != nullptr ? s.cover->get_status_poll_interval_ms() : 0, 0, exchange_.is_stop));
     }
 
     void IOHCController2W::begin_status_poll_tracking_(Session2W &s, uint32_t delay_ms) {
@@ -1240,7 +1243,8 @@ namespace IOHC {
         if (trusted_poll) s.settling_read = remaining_s.has_value();
         const uint32_t remaining_delay_ms =
             remaining_s.has_value() ? (*remaining_s * 1000u) + PRIVATE_RESPONSE_REMAINING_TIME_BIAS_MS : 0;
-        const uint32_t delay_ms = settle_delay_ms(remaining_delay_ms, false);
+        const uint32_t delay_ms =
+            settle_delay_ms(s.cover != nullptr ? s.cover->get_status_poll_interval_ms() : 0, remaining_delay_ms, false);
         const uint32_t next = now + delay_ms;
         // A status update only moves a planned poll earlier, never later.
         if (trusted_poll || s.next_poll_ms == 0 || time_reached(s.next_poll_ms, next)) s.next_poll_ms = next;

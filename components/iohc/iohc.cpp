@@ -201,17 +201,8 @@ void IOHCComponent::set_responder_hop_wanted(bool wanted) { responder_hop_wanted
 bool IOHCComponent::on_receive(IOHC::iohcPacket *packet) {
   this->packets_received_++;
 
-  // While both switches are off, this bridge only transmits and never decodes
-  // received traffic (see set_passive_decode_wanted() in iohc.h).
-  if (!passive_decode_wanted_ && !confirm_resend_wanted_ && !controller2w_.bonding_active() &&
-      !key_extractor_.armed()) {
-    return false;
-  }
-
-  if (passive_decode_wanted_) {
-    ESP_LOGI(TAG, "Frame #%lu received, length=%u, rssi=%.1f dBm", this->packets_received_, packet->buffer_length,
-             packet->rssi);
-  }
+  ESP_LOGD(TAG, "Frame #%lu received, length=%u, rssi=%.1f dBm", this->packets_received_, packet->buffer_length,
+           packet->rssi);
 
   // This bridge's own 2W bonding (Phase 3) - only ever consumes a frame
   // while a bonding attempt is armed AND the frame's source matches that
@@ -237,17 +228,15 @@ bool IOHCComponent::on_receive(IOHC::iohcPacket *packet) {
 
   // Passive 2W status: a 2W (Protocol bit clear) cmd 0x04 "Private Command
   // Answer", sent by a motor to whichever controller polled it. Layout in
-  // iohcPacket.h (_p0x04_14): status, one unknown byte, Main (position echo,
-  // raw/512 = closure %, 0 open to 100 closed), four unmapped bytes, then the
-  // 3-byte address of the controller that last commanded the motor. After a
-  // 1W command of ours that address is our own cover's remote address, so the
-  // answer can be matched without knowing the motor's address. Needs the
+  // iohcPacket.h (_p0x04_14): status, one unknown byte, target and current
+  // position (raw/512 = closure %, 0 open to 100 closed), remaining time, then
+  // the 3-byte address of the controller that last commanded the motor. After
+  // a 1W command of ours that address is our own cover's remote address, so
+  // the answer can be matched without knowing the motor's address. Needs the
   // whole struct in the frame (buffer_length >= 20).
   //
-  // Nothing from this path writes into a cover's own position or state: the
-  // RX pipeline has no integrity check, so a garbled frame could otherwise
-  // corrupt the entity used for control. It only reaches the standalone
-  // sensors and the log (see IOHCCover::on_status_heard()).
+  // The frame is overheard, not authenticated: only Confirm And Resend may act
+  // on it, under the checks in IOHCCover::on_status_heard().
   if (!header.CtrlByte1.asStruct.Protocol && header.cmd == 0x04 && packet->buffer_length >= 20 &&
       packet->buffer_length <= MAX_FRAME_LEN) {
     const auto &answer = packet->payload.packet.msg.p0x04_14;
@@ -274,14 +263,20 @@ bool IOHCComponent::on_receive(IOHC::iohcPacket *packet) {
                source[2], answer.commanding_controller[0], answer.commanding_controller[1],
                answer.commanding_controller[2]);
     } else {
-      uint16_t raw = (static_cast<uint16_t>(answer.main[0]) << 8) | answer.main[1];
-      // Only 0x0000-0xC800 is a closure percentage. Main echoes the last
+      const uint16_t target = (static_cast<uint16_t>(answer.target[0]) << 8) | answer.target[1];
+      const uint16_t current = (static_cast<uint16_t>(answer.current[0]) << 8) | answer.current[1];
+      // Only 0x0000-0xC800 is a closure percentage. The target echoes the last
       // command's parameter: after Stop (0xD200), Vent/Favorite (0xD800),
-      // Secured target (0xD100) or Default (0xD300) it is not a position, and
-      // dividing it would show a plausible but wrong 100% (seen 2026-07-12).
-      bool position_valid = raw <= 0xC800;
-      match->on_status_heard(position_valid ? raw / 512.0f : 0.0f, position_valid, answer.status, commander_is_ours,
-                             packet->rssi, static_cast<float>(packet->afc));
+      // Secured target (0xD100) or Default (0xD300) it is not a position.
+      const bool target_valid = target <= 0xC800;
+      const bool current_valid = current <= 0xC800;
+      // Execution state, bits 2:0: 2/3 waiting and 4 executing are moving;
+      // 0, 1 and 5 are at rest; 6/7 are undefined, then bit 0 says stopped.
+      const uint8_t state = answer.status & 0x07;
+      const bool stopped = state > 5 ? (answer.status & 0x01) != 0 : !(state == 2 || state == 3 || state == 4);
+      match->on_status_heard(target_valid ? target / 512.0f : 0.0f, target_valid, current_valid ? current / 512.0f : 0.0f,
+                             current_valid, stopped, answer.status, commander_is_ours, packet->rssi,
+                             static_cast<float>(packet->afc));
     }
   }
 

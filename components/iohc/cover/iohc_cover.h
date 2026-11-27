@@ -90,6 +90,14 @@ class IOHCCover : public cover::Cover, public Component {
   uint32_t get_travel_time_close() const { return travel_time_close_; }
   void set_travel_time_close(uint32_t seconds);
 
+  // Two-Way mode: how often the motor's position is read while it moves,
+  // and the delay of the first read after a command (laberning's
+  // status_poll_interval; 3 s equals its default without the option). The
+  // motor's own remaining-time count can shorten it, never stretch it.
+  // Persisted like the travel times.
+  uint32_t get_status_poll_interval_ms() const { return status_poll_interval_ms_; }
+  void set_status_poll_interval_ms(uint32_t ms);
+
   // Optional (6/32 hex chars). If both set, the bonded identity comes from
   // YAML/secrets.yaml instead of being randomly generated into this board's
   // own flash - see IOHC::IOHCRemote1W::begin() for why.
@@ -154,15 +162,14 @@ class IOHCCover : public cover::Cover, public Component {
   // motor_address (needs motor_address, optional).
   bool commander_matches(const uint8_t *commander) const;
   bool motor_matches(const uint8_t *source) const;
-  // closure_percent is 0 = open, 100 = closed (the same scale as Overkiz's
-  // "Target closure"); position_valid is false when the Main field echoes a
-  // non-position command (stop, vent, ...).
-  void on_status_heard(float closure_percent, bool position_valid, uint8_t status, bool commander_is_ours,
-                       float rssi_dbm, float afc_hz);
+  // Closures are 0 = open, 100 = closed. target_valid is false when the
+  // target echoes a non-position command (stop, vent, ...); stopped is the
+  // motor's own execution state.
+  void on_status_heard(float target_closure, bool target_valid, float current_closure, bool current_valid,
+                       bool stopped, uint8_t status, bool commander_is_ours, float rssi_dbm, float afc_hz);
   // Any frame sent by this cover's motor_address, decoded or not. RSSI is a
   // property of the reception, so a misdecoded payload cannot corrupt it.
   void update_last_rssi(float rssi_dbm);
-  void set_target_closure_sensor(sensor::Sensor *s) { target_closure_sensor_ = s; }
   void set_last_rssi_sensor(sensor::Sensor *s) { last_rssi_sensor_ = s; }
   // Counters for the confirm-and-resend below (since boot): commands that had
   // to be sent again, and commands still unconfirmed after the last resend.
@@ -185,6 +192,7 @@ class IOHCCover : public cover::Cover, public Component {
   uint32_t travel_time_open_default_{25};
   uint32_t travel_time_close_default_{25};
   uint32_t travel_time_open_{25};
+  uint32_t status_poll_interval_ms_{3000};
   uint32_t travel_time_close_{25};
   // Pushes travel_time_open_/travel_time_close_ into remote_, swapping
   // which one lands in BlindPosition's raw-space "open" slot vs "close"
@@ -206,7 +214,6 @@ class IOHCCover : public cover::Cover, public Component {
   IOHC::address motor_address_{};
   bool has_motor_address_{false};
   bool low_power_2w_{false};
-  sensor::Sensor *target_closure_sensor_{nullptr};
   sensor::Sensor *last_rssi_sensor_{nullptr};
   sensor::Sensor *resends_sensor_{nullptr};
   sensor::Sensor *failed_sensor_{nullptr};

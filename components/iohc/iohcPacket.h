@@ -290,11 +290,16 @@ namespace IOHC {
     // passive-decode path reads buffer[11]/[12] directly (= this struct's
     // `main[0]`/`main[1]`) rather than using this struct - kept that way
     // deliberately for now, see Phase 3a notes before consolidating.
+    // Byte layout of a status-poll answer per laberning/home_io_control
+    // (hub_status.cpp PRIVATE_RESPONSE_*): status (execution state in bits
+    // 2:0), then the TARGET position at 2-3 and the CURRENT position at 4-5
+    // (raw/512 = closure %), the remaining travel seconds at 6-7.
     struct _p0x04_14 {
         uint8_t status;
         uint8_t unknown1;
-        uint8_t main[2]; // position echo, raw/2 = closure %
-        uint8_t unmapped1[4];
+        uint8_t target[2];
+        uint8_t current[2];
+        uint8_t remaining[2];
         address commanding_controller; // last controller to command a move - NOT necessarily TaHoma's own address
         uint8_t unmapped2[3];
     };

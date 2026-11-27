@@ -323,7 +323,7 @@ else _dir[0] = ' ';
                         break;
                     case 0x04:
                         if (dataLen == 14) {
-                            auto main = static_cast<unsigned>((this->payload.packet.msg.p0x04_14.main[0] << 8) | this->payload.packet.msg.p0x04_14.main[1]);
+                            auto main = static_cast<unsigned>((this->payload.packet.msg.p0x04_14.target[0] << 8) | this->payload.packet.msg.p0x04_14.target[1]);
                             appendf(" Status %X Unk1 %X Main %4X (=%.0f%% closed) Commander %s",
                                    this->payload.packet.msg.p0x04_14.status,
                                    this->payload.packet.msg.p0x04_14.unknown1,

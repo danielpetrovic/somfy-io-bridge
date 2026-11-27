@@ -25,7 +25,7 @@ esphome:
   min_version: 2026.11.0
   project:
     name: "danielpetrovic.Somfy IO Bridge"
-    version: "1.0.2-2w8"
+    version: "1.0.2-2w9"
   # The vendored radio stack talks to the SX1276 directly via Arduino's SPI
   # library, and the Phase 2 pairing/command layer persists bonded remote
   # identities via Arduino's Preferences (NVS) library. Neither gets picked
@@ -501,28 +501,6 @@ switch:
           format: "Recover System Key (2W) turned OFF"
           level: INFO
       - lambda: id(iohc_hub).key_extractor().set_armed(false);
-  # Diagnostic: stays OFF by default. Turns on the INFO log line for every
-  # received frame (and the key-sniffer/bonding frame handling) on top of the
-  # decoding that Confirm And Resend already switches on by itself. The
-  # per-cover Target Closure and Last RSSI sensors fill whenever either switch
-  # is on. (The 2026-07-13 suspicion that decoding collided with TaHoma's
-  # polling was wrong: the real cause was a loop in this bridge that flooded
-  # the IO network, fixed in a later version.)
-  - platform: template
-    name: "Debug Passive Decode (2W)"
-    icon: mdi:radio-tower
-    optimistic: true
-    restore_mode: ALWAYS_OFF
-    turn_on_action:
-      - logger.log:
-          format: "Debug Passive Decode (2W) turned ON - decoding all received frames"
-          level: WARN
-      - lambda: id(iohc_hub).set_passive_decode_wanted(true);
-    turn_off_action:
-      - logger.log:
-          format: "Debug Passive Decode (2W) turned OFF - only transmitting, not decoding received frames"
-          level: WARN
-      - lambda: id(iohc_hub).set_passive_decode_wanted(false);
   # Blanks the OLED without cutting power - useful for a wall-mounted unit at
   # night, and reduces long-term burn-in. Reflects real hardware state
   # (is_on()), not just an assumed toggle.
@@ -609,8 +587,7 @@ font:
 
 # Per-cover pages: name on line 1, this bridge's own local/HA position on
 # line 2. Real motor-reported position and per-motor RSSI display used to be
-# on line 3 (from the now-removed Target Closure/Last RSSI sensors) - pulled
-# entirely, see the "Debug Passive Decode (2W)" switch's own comment.
+# on line 3 (from the removed Target Closure sensor and the Last RSSI sensor).
 display:
   - platform: ssd1306_i2c
     id: oled

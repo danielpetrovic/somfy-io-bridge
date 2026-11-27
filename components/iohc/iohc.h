@@ -37,8 +37,7 @@ class IOHCComponent : public Component {
   // Passive 2W status: every cover registers itself in setup() so that a
   // motor's status answer (cmd 0x04), overheard while another controller such
   // as TaHoma polls it, can be matched to a cover by its "Commander" field
-  // (our own remote address) or by the motor address. Nothing is decoded
-  // unless "Debug Passive Decode (2W)" is on.
+  // (our own remote address) or by the motor address.
   void register_status_cover(IOHCCover *cover) { this->status_covers_.push_back(cover); }
   const std::vector<IOHCCover *> &covers() const { return this->status_covers_; }
 
@@ -99,16 +98,6 @@ class IOHCComponent : public Component {
   // interfere with each other's hop_plan_.
   void set_responder_hop_wanted(bool wanted);
 
-  // When false, on_receive() skips ALL processing of received frames
-  // (passive 2W status for the standalone cover sensors, controller2w's own
-  // bonding/key-sniffer frame handling) right after the packet counter - the
-  // bridge still transmits 1W commands normally. It was added on 2026-07-13
-  // on the suspicion that continuous decoding collided with TaHoma's polling;
-  // that was wrong (the real cause was a loop in this bridge that flooded the
-  // IO network, fixed in a later version), so decoding is not a risk. It
-  // stays off by default only until the passive status path is proven.
-  void set_passive_decode_wanted(bool wanted) { passive_decode_wanted_ = wanted; }
-  bool passive_decode_wanted() const { return passive_decode_wanted_; }
 
   // Confirm-and-resend (see IOHCCover::arm_confirmation_()): while on, received
   // frames are decoded even when the debug switch above is off, because the
@@ -147,7 +136,6 @@ class IOHCComponent : public Component {
   uint32_t last_hop_us_{0};
   bool bonding_hop_wanted_{false};
   bool responder_hop_wanted_{false};
-  bool passive_decode_wanted_{false};
   std::string fixed_controller_hex_;
   std::string fixed_system_key_hex_;
 
