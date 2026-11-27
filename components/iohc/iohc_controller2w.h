@@ -90,7 +90,8 @@ namespace IOHC {
         // implementation, even though it can't explain why 0x28 itself has
         // never once been answered on this install (this step only matters
         // after receiving a 0x29, which has never happened).
-        WAITING_CONFIRM_ACK,    // sent 0x2C, waiting for the motor's 0x2D
+        WAITING_CONFIRM_ACK,    // sent 0x2C, waiting for the motor's 0x2D (up to 3 tries, silence is not fatal)
+        KEY_INIT_PENDING,       // 300 ms pause before the 0x31 (also between key-exchange rounds)
         SENT_KEY_INIT,          // sent 0x31, waiting for the motor's 0x3C challenge (or an early 0x33)
         SENT_KEY_TRANSFER,      // sent 0x32 (real system_key, obfuscated), waiting for 0x33
         BONDED,
@@ -208,6 +209,15 @@ namespace IOHC {
 
         bool is_bonded(const IOHC::address &motor_address) const;
 
+        // True while a bonding attempt is waiting for the motor (any state
+        // between the 0x28 and the final 0x33). The hub decodes received
+        // frames during that window regardless of the debug switches.
+        bool bonding_active() const {
+            return attempt_.state == BondState::WAITING_DISCOVER_RESP ||
+                   attempt_.state == BondState::WAITING_CONFIRM_ACK || attempt_.state == BondState::KEY_INIT_PENDING ||
+                   attempt_.state == BondState::SENT_KEY_INIT || attempt_.state == BondState::SENT_KEY_TRANSFER;
+        }
+
         // Passive 2W key sniffing (Findings 27/28/31) - address-agnostic and
         // hub-scoped: unlike arm_bonding(), does not target one specific
         // motor. Watches every 2W frame this bridge overhears, from anyone,
@@ -237,7 +247,7 @@ namespace IOHC {
         // different header flags from every other 2W frame this class
         // sends, which all use forge_2w_packet()'s EndFrame=1/LowPower=0
         // defaults).
-        void send_discover_confirmation(const IOHC::address &to);
+        void send_discover_confirmation(const IOHC::address &to, bool low_power);
         void send_key_init(const IOHC::address &to);
         void send_key_transfer(const IOHC::address &to, const uint8_t *challenge6);
         void send_set_config1(const IOHC::address &to);
@@ -276,6 +286,16 @@ namespace IOHC {
             // needed here anymore.
             uint32_t last_discover_sent_ms{0};
             uint8_t discover_retries{0};
+            // Sequence bookkeeping (see the timing constants in the .cpp).
+            uint32_t started_ms{0};
+            uint32_t last_tx_ms{0};          // last frame of the current step
+            uint32_t key_init_due_ms{0};     // KEY_INIT_PENDING: when the 0x31 goes out
+            bool target_low_power{false};    // power class from the motor's 0x29 reply
+            uint8_t confirm_tries{0};        // 0x2C sends so far
+            uint8_t key_rounds{0};           // 0x31 rounds started (1-based)
+            uint8_t key_init_sends{0};       // 0x31 sends in this round
+            uint8_t transfer_tries{0};       // 0x32 sends in this round
+            uint8_t challenge[6]{};          // the motor's 0x3C challenge of this round
         } attempt_;
 
         std::unordered_map<uint32_t, Session2W> sessions_;  // keyed by pack_address(motor)

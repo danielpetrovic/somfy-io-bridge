@@ -75,6 +75,13 @@ namespace IOHC {
             // actually arrived on (iohcRadio::receive() reads that array to
             // set iohcPacket::frequency).
             void retune(uint32_t freq_hz);
+            // Takes a receiver out of a stuck PREAMBLE state: a retune while
+            // receiving leaves the chip's PreambleDetect flag latched, and
+            // the DIO4 interrupt is rising-edge only, so nothing ever ends
+            // that state by itself and the cooperative hop (which refuses to
+            // move during PREAMBLE) freezes on one channel. Cycles standby ->
+            // RX once and clears the flags. No-op while transmitting.
+            void recover_rx();
             void send(iohcPacket *packet);
             void send(std::vector<iohcPacket*>&iohcTx);
             static void setRadioState(RadioState newState);

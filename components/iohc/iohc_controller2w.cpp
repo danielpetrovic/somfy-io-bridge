@@ -15,6 +15,7 @@
  */
 
 #include "iohc_controller2w.h"
+#include "iohc_2w_frame.h"
 #include "iohcCryptoHelpers.h"
 #include "cover/iohc_cover.h"
 #include "iohc.h"
@@ -43,6 +44,32 @@ namespace IOHC {
     // matches home_io_control/proto_timing.h's own
     // PAIRING_DISCOVERY_WAIT_MS default (2000ms) reasonably closely.
     static constexpr uint32_t DISCOVER_RESEND_MS = 2000;
+
+    // Start preamble (SX1276 bytes) of the 0x28 broadcast. Real controllers
+    // send the discovery behind about 52 preamble bytes (Somfy patent
+    // EP 2 401 729 B1, confirmed by SDR measurements in laberning/
+    // home_io_control's ADR 0078) and some receivers ignore it behind the
+    // long wake-up preamble every other send of this bridge starts with.
+    // Directed pairing start frames (0x2C, 0x31, 0x6F) use the same short start
+    // preamble as the discovery. laberning/home_io_control caps every directed
+    // pairing frame to the discovery preamble (pairing_start_preamble()), also
+    // for low-power targets, and its default is 32 bytes on this radio (ADR
+    // 0078). A frame that continues an exchange (0x32) uses the short response
+    // preamble instead, about 3.5 ms (proto_timing.h RESPONSE_PREAMBLE_MS).
+    static constexpr uint16_t PAIRING_START_PREAMBLE_SYMBOLS = 32;
+    static constexpr uint16_t PAIRING_CONTINUATION_PREAMBLE_SYMBOLS = 16;
+
+    // Sequence timing, from laberning/home_io_control's pairing_engine.h and
+    // proto_timing.h: 1.5 s per discover-confirm try (3 tries, silence is not
+    // an error), 300 ms pause before the key-init, 500 ms windows for the 0x3C
+    // challenge and the 0x33 confirm, 3 tries per step, 3 rounds in total.
+    static constexpr uint32_t CONFIRM_WINDOW_MS = 1500;
+    static constexpr uint8_t CONFIRM_TRIES = 3;
+    static constexpr uint32_t KEY_INIT_DELAY_MS = 300;
+    static constexpr uint32_t KEY_WINDOW_MS = 500;
+    static constexpr uint8_t KEY_STEP_TRIES = 3;
+    static constexpr uint8_t KEY_ROUNDS = 3;
+    static constexpr uint32_t ATTEMPT_CAP_MS = 90000;
 
     // Fixed SET_CONFIG1 payload - asks the device to auto-broadcast status
     // updates. Matches github.com/laberning/home_io_control's own working
@@ -138,8 +165,20 @@ namespace IOHC {
         attempt_.state = BondState::WAITING_DISCOVER_RESP;
         attempt_.state_entered_ms = esphome::millis();
         attempt_.discover_retries = 0;
-        if (owner_ != nullptr)
+        attempt_.started_ms = attempt_.state_entered_ms;
+        attempt_.last_tx_ms = 0;
+        attempt_.key_init_due_ms = 0;
+        attempt_.target_low_power = false;
+        attempt_.confirm_tries = 0;
+        attempt_.key_rounds = 0;
+        attempt_.key_init_sends = 0;
+        attempt_.transfer_tries = 0;
+        if (owner_ != nullptr) {
+            // The reply to a broadcast almost never comes back on the channel
+            // it was sent on, so listen on CH1 and CH3 only until a 0x29 shows up.
+            owner_->set_hop_plan(esphome::iohc::IOHCComponent::HopPlan::DISCOVERY);
             owner_->set_bonding_hop_wanted(true);
+        }
         send_discover();
         attempt_.last_discover_sent_ms = esphome::millis();
         ESP_LOGI(TAG, "2W bonding with %02X%02X%02X: sent DISCOVER (0x28) on CH2, waiting up to 60s (resending "
@@ -224,9 +263,81 @@ namespace IOHC {
             }
         }
 
-        uint32_t elapsed = esphome::millis() - attempt_.state_entered_ms;
-        uint32_t timeout = (attempt_.state == BondState::WAITING_DISCOVER_RESP) ? TIMEOUT_ARMED_MS : TIMEOUT_STEP_MS;
-        if (elapsed > timeout) {
+        const uint32_t now = esphome::millis();
+
+        // Overall cap for the whole attempt.
+        if ((now - attempt_.started_ms) > ATTEMPT_CAP_MS) {
+            reset_bonding(BondState::FAILED, "timed out, resetting - press Program (2W) again to retry");
+            return;
+        }
+
+        // 0x2C: up to CONFIRM_TRIES sends, CONFIRM_WINDOW_MS apart. A motor that
+        // never answers with a 0x2D is not fatal, real controllers carry on.
+        if (attempt_.state == BondState::WAITING_CONFIRM_ACK && (now - attempt_.last_tx_ms) >= CONFIRM_WINDOW_MS) {
+            if (attempt_.confirm_tries < CONFIRM_TRIES) {
+                attempt_.confirm_tries++;
+                send_discover_confirmation(attempt_.target_motor, attempt_.target_low_power);
+                attempt_.last_tx_ms = now;
+            } else {
+                ESP_LOGI(TAG, "2W bonding: no 0x2D after %u tries, continuing with the key exchange", CONFIRM_TRIES);
+                attempt_.key_init_due_ms = now + KEY_INIT_DELAY_MS;
+                attempt_.state = BondState::KEY_INIT_PENDING;
+                attempt_.state_entered_ms = now;
+            }
+            return;
+        }
+
+        // Pause before a key-init round, then send the 0x31.
+        if (attempt_.state == BondState::KEY_INIT_PENDING && now >= attempt_.key_init_due_ms) {
+            if (attempt_.key_rounds >= KEY_ROUNDS) {
+                reset_bonding(BondState::FAILED, "the key exchange did not complete in 3 rounds, resetting");
+                return;
+            }
+            attempt_.key_rounds++;
+            attempt_.key_init_sends = 1;
+            send_key_init(attempt_.target_motor);
+            attempt_.last_tx_ms = now;
+            attempt_.state = BondState::SENT_KEY_INIT;
+            attempt_.state_entered_ms = now;
+            return;
+        }
+
+        // 0x31 sent: wait for the 0x3C challenge, resend up to KEY_STEP_TRIES.
+        if (attempt_.state == BondState::SENT_KEY_INIT && (now - attempt_.last_tx_ms) >= KEY_WINDOW_MS) {
+            if (attempt_.key_init_sends < KEY_STEP_TRIES) {
+                attempt_.key_init_sends++;
+                send_key_init(attempt_.target_motor);
+                attempt_.last_tx_ms = now;
+            } else {
+                ESP_LOGW(TAG, "2W bonding: no 0x3C challenge after %u key-inits in round %u", KEY_STEP_TRIES,
+                         attempt_.key_rounds);
+                attempt_.key_init_due_ms = now + KEY_INIT_DELAY_MS;
+                attempt_.state = BondState::KEY_INIT_PENDING;
+                attempt_.state_entered_ms = now;
+            }
+            return;
+        }
+
+        // 0x32 sent: wait for the 0x33 confirm, resend up to KEY_STEP_TRIES, then
+        // start the next round (which also switches the key-wrap IV derivation).
+        if (attempt_.state == BondState::SENT_KEY_TRANSFER && (now - attempt_.last_tx_ms) >= KEY_WINDOW_MS) {
+            if (attempt_.transfer_tries < KEY_STEP_TRIES) {
+                attempt_.transfer_tries++;
+                send_key_transfer(attempt_.target_motor, attempt_.challenge);
+                attempt_.last_tx_ms = now;
+            } else {
+                ESP_LOGW(TAG, "2W bonding: no 0x33 after %u key transfers in round %u", KEY_STEP_TRIES,
+                         attempt_.key_rounds);
+                attempt_.key_init_due_ms = now + KEY_INIT_DELAY_MS;
+                attempt_.state = BondState::KEY_INIT_PENDING;
+                attempt_.state_entered_ms = now;
+            }
+            return;
+        }
+
+        // Waiting for the discovery reply: 60 s armed window.
+        if (attempt_.state == BondState::WAITING_DISCOVER_RESP &&
+            (now - attempt_.state_entered_ms) > TIMEOUT_ARMED_MS) {
             reset_bonding(BondState::FAILED, "timed out, resetting - press Program (2W) again to retry");
         }
     }
@@ -255,108 +366,88 @@ namespace IOHC {
     }
 
     // --- Frame builders ---
-    // Header conventions (MsgLen = buffer_length-1, Protocol=0 for 2W,
-    // CtrlByte2=0) mirror IOHCRemote1W::forge_packet()'s pattern, adapted
-    // for 2W's unicast (not broadcast-group) addressing. CtrlByte2=0 is
-    // inferred from every real 2W capture this session never showing any
-    // of decode()'s [LPM]/[B]/[R]/[PRIO] tags for ordinary command frames -
-    // not independently confirmed for frames WE originate, since we have
-    // no real transmitted-by-us 2W capture to check against yet.
-
-    static void forge_2w_packet(iohcPacket *packet, const IOHC::address &from, const IOHC::address &to) {
-        packet->payload.packet.header.CtrlByte1.asStruct.MsgLen = sizeof(_header) - 1;
-        packet->payload.packet.header.CtrlByte1.asStruct.Protocol = 0;  // 2W
-        packet->payload.packet.header.CtrlByte1.asStruct.StartFrame = 1;
-        packet->payload.packet.header.CtrlByte1.asStruct.EndFrame = 1;
-        packet->payload.packet.header.CtrlByte2.asByte = 0;
-        memcpy(packet->payload.packet.header.source, from, sizeof(IOHC::address));
-        memcpy(packet->payload.packet.header.target, to, sizeof(IOHC::address));
-        packet->frequency = CHANNEL2;
-        packet->repeatTime = 0;
-        packet->repeat = 0;  // 2W is single-shot per direction, unlike 1W's repeat=4 broadcast redundancy - see Finding 13/plan file, deliberate, do not "fix" back to 1W's convention
-        packet->lock = false;
-    }
+    // forge_2w_packet()/forge_2w_frame() now live in iohc_2w_frame.h, shared
+    // with the "Recover System Key" responder (iohc_key_extraction.cpp),
+    // which builds the same frame shapes from the device side.
 
     void IOHCController2W::send_discover() {
-        // Controller-initiated (Finding 20) - broadcasts to 0x00003B
-        // (BROADCAST_DISCOVER in home_io_control's proto_constants.h; also
-        // independently the exact broadcast target TaHoma itself uses for
-        // its own 0x2A DISCOVER_REMOTE per Finding 14, so this address is
-        // corroborated from two independent sources even though the
-        // command byte differs). 0-byte payload.
+        // Controller-initiated broadcast to 0x00003B, 0-byte payload, a single
+        // start+end frame behind the short start preamble.
         static const IOHC::address kBroadcastDiscover = {0x00, 0x00, 0x3B};
         auto *packet = new iohcPacket;
-        forge_2w_packet(packet, controller_address_, kBroadcastDiscover);
+        forge_2w_frame(packet, controller_address_, kBroadcastDiscover, true, true, false);
         packet->payload.packet.header.cmd = 0x28;
+        packet->start_preamble = PAIRING_START_PREAMBLE_SYMBOLS;
         packet->buffer_length = packet->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
-        // Always CH2 for TX (Finding 22 - "Commands are sent on CH2";
-        // RX-side hopping in loop() is what catches a reply on CH1/CH3).
+        // Always CH2 for TX; the reply comes back on CH1 or CH3 almost every time.
         radio_->retune(CHANNEL2);
         listen_before_talk();
         radio_->send(packet);
     }
 
-    void IOHCController2W::send_discover_confirmation(const IOHC::address &to) {
-        // Byte-verified against nicolas5000/io-rts-esp32's real
-        // create_discovery_confirmation_request(): init_frame(frame, true,
-        // true, false, true) - is_2w=true, start=true, END=FALSE,
-        // LOW_POWER=TRUE. Deliberately different from forge_2w_packet()'s
-        // usual EndFrame=1/LowPower=0 defaults, overridden explicitly below
-        // to match exactly. 0-byte payload, unicast (the motor address just
-        // learned from its 0x29 response).
+    void IOHCController2W::send_discover_confirmation(const IOHC::address &to, bool low_power) {
+        // 0-byte payload, start frame, low-power flag follows the target's
+        // power class from its discovery reply, no ACK bit.
         auto *packet = new iohcPacket;
-        forge_2w_packet(packet, controller_address_, to);
-        packet->payload.packet.header.CtrlByte1.asStruct.EndFrame = 0;
-        packet->payload.packet.header.CtrlByte2.asStruct.LPM = 1;
+        forge_2w_frame(packet, controller_address_, to, true, false, low_power);
         packet->payload.packet.header.cmd = 0x2C;
+        packet->start_preamble = PAIRING_START_PREAMBLE_SYMBOLS;
         packet->buffer_length = packet->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
         radio_->retune(CHANNEL2);
         listen_before_talk();
         radio_->send(packet);
-        ESP_LOGI(TAG, "Sent DISCOVER_CONFIRMATION (0x2C) to %02X%02X%02X", to[0], to[1], to[2]);
+        ESP_LOGI(TAG, "Sent DISCOVER_CONFIRMATION (0x2C) to %02X%02X%02X (low-power flag %u, try %u/%u)", to[0],
+                 to[1], to[2], low_power ? 1 : 0, attempt_.confirm_tries, CONFIRM_TRIES);
     }
 
     void IOHCController2W::send_key_init(const IOHC::address &to) {
-        // 0-byte payload, unicast to the motor address just learned from
-        // its 0x29 response.
+        // Start frame with the low-power flag set (control bytes 48 20), the
+        // fixed shape real controllers use for the pairing key-init.
         auto *packet = new iohcPacket;
-        forge_2w_packet(packet, controller_address_, to);
+        forge_2w_frame(packet, controller_address_, to, true, false, true);
         packet->payload.packet.header.cmd = 0x31;
+        packet->start_preamble = PAIRING_START_PREAMBLE_SYMBOLS;
         packet->buffer_length = packet->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
         radio_->retune(CHANNEL2);
         listen_before_talk();
         radio_->send(packet);
-        ESP_LOGI(TAG, "Sent KEY_INIT (0x31) to %02X%02X%02X", to[0], to[1], to[2]);
+        ESP_LOGI(TAG, "Sent KEY_INIT (0x31) to %02X%02X%02X (round %u/%u, send %u/%u)", to[0], to[1], to[2],
+                 attempt_.key_rounds, KEY_ROUNDS, attempt_.key_init_sends, KEY_STEP_TRIES);
     }
 
     void IOHCController2W::send_key_transfer(const IOHC::address &to, const uint8_t *challenge6) {
-        // Confirmed algorithm (Finding 20): build_key_transfert_response()
-        // now XORs against this controller's real system_key_, not the
-        // fixed transfer_key - see iohcCryptoHelpers.h/.cpp for the fix.
+        // The IV of the key wrap is derived from the KEY_INIT byte in the first
+        // round and from the challenge frame in the next one (see
+        // build_key_transfert_response()), so one test covers both.
+        const bool iv_from_key_init = (attempt_.key_rounds % 2) == 1;
         uint8_t response[16];
-        iohcCrypto::build_key_transfert_response(challenge6, system_key_, response);
+        iohcCrypto::build_key_transfert_response(challenge6, system_key_, response, iv_from_key_init);
 
+        // Continuation frame (neither start nor end) with the low-power flag set (18 20),
+        // behind the short response preamble.
         auto *packet = new iohcPacket;
-        forge_2w_packet(packet, controller_address_, to);
+        forge_2w_frame(packet, controller_address_, to, false, false, true);
         packet->payload.packet.header.CtrlByte1.asStruct.MsgLen += sizeof(_p0x32);
         packet->payload.packet.header.cmd = 0x32;
         memcpy(packet->payload.packet.msg.p0x32.encrypted_key, response, 16);
+        packet->start_preamble = PAIRING_CONTINUATION_PREAMBLE_SYMBOLS;
         packet->buffer_length = packet->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
         radio_->retune(CHANNEL2);
         listen_before_talk();
         radio_->send(packet);
-        ESP_LOGI(TAG, "Sent KEY_TRANSFER (0x32) to %02X%02X%02X", to[0], to[1], to[2]);
+        ESP_LOGI(TAG, "Sent KEY_TRANSFER (0x32) to %02X%02X%02X (IV from %s, send %u/%u)", to[0], to[1], to[2],
+                 iv_from_key_init ? "the key-init byte" : "the challenge frame", attempt_.transfer_tries,
+                 KEY_STEP_TRIES);
     }
 
     void IOHCController2W::send_set_config1(const IOHC::address &to) {
-        // Best-effort - not required for BONDED status, no response waited
-        // for. Fixed payload confirmed from home_io_control's own working
-        // controller captures (Finding 20).
+        // Best-effort, no response waited for. Start frame, low-power set.
         auto *packet = new iohcPacket;
-        forge_2w_packet(packet, controller_address_, to);
+        forge_2w_frame(packet, controller_address_, to, true, false, true);
         packet->payload.packet.header.CtrlByte1.asStruct.MsgLen += sizeof(_p0x6f);
         packet->payload.packet.header.cmd = 0x6F;
         memcpy(packet->payload.packet.msg.p0x6f.data, SET_CONFIG1_PAYLOAD, sizeof(SET_CONFIG1_PAYLOAD));
+        packet->start_preamble = PAIRING_START_PREAMBLE_SYMBOLS;
         packet->buffer_length = packet->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
         radio_->retune(CHANNEL2);
         listen_before_talk();
@@ -513,54 +604,119 @@ namespace IOHC {
         // unrelated passive-decode Tier 1 feature (iohc.cpp's on_receive()
         // still gets first look at everything, this is called after/instead
         // only for the bonding-family commands it explicitly routes here).
-        if (attempt_.state == BondState::IDLE || attempt_.state == BondState::BONDED) return false;
+        if (!bonding_active()) return false;
 
         const auto &source = packet->payload.packet.header.source;
+        const auto &target = packet->payload.packet.header.target;
+        uint8_t cmd = packet->payload.packet.header.cmd;
+
+        // While a bonding attempt waits, every frame heard is logged with its
+        // addresses, so a reply that arrives from an unexpected address or on
+        // an unexpected channel is visible instead of silently dropped.
+        ESP_LOGI(TAG, "Bonding RX: cmd=0x%02X %02X%02X%02X -> %02X%02X%02X, %s, len=%u, %.1f dBm, %lu Hz", cmd,
+                 source[0], source[1], source[2], target[0], target[1], target[2],
+                 packet->payload.packet.header.CtrlByte1.asStruct.Protocol ? "1W" : "2W", packet->buffer_length,
+                 packet->rssi, static_cast<unsigned long>(packet->frequency));
+
+        // The discovery reply is accepted from whichever motor answers: the
+        // configured motor address may not be what the motor reports after a
+        // reset, and a mismatch used to drop the reply without a trace. The
+        // rest of the exchange then uses the address that actually answered.
+        // Only a motor in its own pairing window answers a 0x28, so this
+        // cannot pick up an unrelated shutter.
+        if (attempt_.state == BondState::WAITING_DISCOVER_RESP && cmd == 0x29 &&
+            !packet->payload.packet.header.CtrlByte1.asStruct.Protocol &&
+            memcmp(source, attempt_.target_motor, sizeof(IOHC::address)) != 0) {
+            ESP_LOGW(TAG, "DISCOVER_RESP (0x29) came from %02X%02X%02X, not the configured %02X%02X%02X - "
+                          "continuing with the address that answered",
+                     source[0], source[1], source[2], attempt_.target_motor[0], attempt_.target_motor[1],
+                     attempt_.target_motor[2]);
+            memcpy(attempt_.target_motor, source, sizeof(IOHC::address));
+        }
+
         if (memcmp(source, attempt_.target_motor, sizeof(IOHC::address)) != 0) return false;
 
-        uint8_t cmd = packet->payload.packet.header.cmd;
+        const uint8_t *data = packet->payload.buffer + sizeof(_header);
+        const uint8_t data_len = packet->buffer_length > sizeof(_header)
+                                     ? static_cast<uint8_t>(packet->buffer_length - sizeof(_header))
+                                     : 0;
+        const uint32_t now = esphome::millis();
+
+        // A refusal from the motor ends the attempt with its reason.
+        if (cmd == 0xFE && attempt_.state != BondState::WAITING_DISCOVER_RESP) {
+            ESP_LOGW(TAG, "2W bonding: the motor answered with an error 0x%02X in state %u", data_len > 0 ? data[0] : 0,
+                     static_cast<unsigned>(attempt_.state));
+            return true;
+        }
 
         switch (attempt_.state) {
             case BondState::WAITING_DISCOVER_RESP:
                 if (cmd != 0x29) return false;
+                // The reply carries type, manufacturer and the Multi Information
+                // Byte whose low bits give the power class (1 = low power).
+                // Power class decides the low-power flag of the 0x2C.
+                if (data_len >= 7) {
+                    const uint8_t flags = data[6];
+                    attempt_.target_low_power = (flags & 0x03) == 1;
+                    ESP_LOGI(TAG, "DISCOVER_RESP (0x29): manufacturer=%u flags=0x%02X power class=%s, addressed to "
+                                  "%02X%02X%02X (this controller is %02X%02X%02X)",
+                             data[5], flags, attempt_.target_low_power ? "low power" : "always listening", target[0],
+                             target[1], target[2], controller_address_[0], controller_address_[1],
+                             controller_address_[2]);
+                }
                 ESP_LOGI(TAG, "Received DISCOVER_RESP (0x29) from %02X%02X%02X - sending DISCOVER_CONFIRMATION",
                          source[0], source[1], source[2]);
-                // Discovery's RX side may have been hopped to CH1/CH3 when
-                // this arrived - send_discover_confirmation() retunes to CH2
-                // itself before transmitting (Finding 22 - all TX is
-                // CH2-only).
-                send_discover_confirmation(source);
+                // Every unicast pairing reply comes back on the request channel (CH2).
+                if (owner_ != nullptr)
+                    owner_->set_hop_plan(esphome::iohc::IOHCComponent::HopPlan::HOLD_REQUEST);
+                attempt_.confirm_tries = 1;
+                send_discover_confirmation(source, attempt_.target_low_power);
+                attempt_.last_tx_ms = now;
                 attempt_.state = BondState::WAITING_CONFIRM_ACK;
-                attempt_.state_entered_ms = esphome::millis();
+                attempt_.state_entered_ms = now;
                 return true;
 
             case BondState::WAITING_CONFIRM_ACK:
                 if (cmd != 0x2D) return false;
-                ESP_LOGI(TAG, "Received DISCOVER_CONFIRMATION_ACK (0x2D) from %02X%02X%02X - sending KEY_INIT",
-                         source[0], source[1], source[2]);
-                send_key_init(source);
-                attempt_.state = BondState::SENT_KEY_INIT;
-                attempt_.state_entered_ms = esphome::millis();
+                ESP_LOGI(TAG, "Received DISCOVER_CONFIRMATION_ACK (0x2D) from %02X%02X%02X - key-init follows after "
+                              "%u ms",
+                         source[0], source[1], source[2], static_cast<unsigned>(KEY_INIT_DELAY_MS));
+                attempt_.key_init_due_ms = now + KEY_INIT_DELAY_MS;
+                attempt_.state = BondState::KEY_INIT_PENDING;
+                attempt_.state_entered_ms = now;
                 return true;
 
-            case BondState::SENT_KEY_INIT:
-                // Most devices challenge with 0x3C; some accept immediately
-                // with a direct 0x33 (Finding 20 / home_io_control's own
-                // wait_for_key_challenge_() comment - observed mostly when
-                // the controller's TX->RX turnaround is slow enough that
-                // the 0x3C gets missed). Accept either.
+            case BondState::KEY_INIT_PENDING:
+                // A late 0x2D (or a 0x33 that crossed our 0x32) in the pause is harmless.
                 if (cmd == 0x33) {
                     finalize_bonding(source);
                     return true;
                 }
-                if (cmd != 0x3C) return false;
+                return false;
+
+            case BondState::SENT_KEY_INIT:
+                // Most devices challenge with 0x3C; some accept immediately
+                // with a direct 0x33. Accept either.
+                if (cmd == 0x33) {
+                    finalize_bonding(source);
+                    return true;
+                }
+                if (cmd != 0x3C || data_len != 6) return false;
                 ESP_LOGI(TAG, "Received CHALLENGE_REQ (0x3C) - sending KEY_TRANSFER");
-                send_key_transfer(source, packet->payload.packet.msg.p0x3c.challenge);
+                memcpy(attempt_.challenge, data, sizeof(attempt_.challenge));
+                attempt_.transfer_tries = 1;
+                send_key_transfer(source, attempt_.challenge);
+                attempt_.last_tx_ms = now;
                 attempt_.state = BondState::SENT_KEY_TRANSFER;
-                attempt_.state_entered_ms = esphome::millis();
+                attempt_.state_entered_ms = now;
                 return true;
 
             case BondState::SENT_KEY_TRANSFER:
+                if (cmd == 0x3C) {
+                    ESP_LOGW(TAG, "2W bonding: the motor challenged the key transfer with a second 0x3C (a 0x3D "
+                                  "answer is not implemented for bonding yet)");
+                    return true;
+                }
                 if (cmd != 0x33) return false;
                 finalize_bonding(source);
                 return true;

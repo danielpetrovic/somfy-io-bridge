@@ -427,6 +427,12 @@ namespace IOHC {
         unsigned long repeatTime = 0L;
         uint8_t repeat = 0;
         bool lock = false;
+        // Preamble length (SX1276 bytes) of the FIRST transmission of this packet.
+        // 0 keeps the default long wake-up preamble every send starts with. Set it
+        // for frames that must reach an always-listening receiver behind a short
+        // start preamble (the 2W discovery broadcast): real controllers send the
+        // discovery behind about 52 bytes, and some receivers ignore a long one.
+        uint16_t start_preamble = 0;
         unsigned long delayed = 0;
 
         double afc{}; // AFC freq correction applied

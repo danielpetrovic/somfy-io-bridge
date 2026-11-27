@@ -236,12 +236,29 @@ namespace iohcCrypto {
     challenge_fd buffer is built explicitly from the CHALLENGE_REQUEST
     frame's own command_id + data, not the KEY_INIT frame's.
 */
-    void build_key_transfert_response(const uint8_t *motor_challenge, const uint8_t *system_key, uint8_t *out_response16) {
+    void build_key_transfert_response(const uint8_t *motor_challenge, const uint8_t *system_key, uint8_t *out_response16,
+                                      bool iv_from_key_init) {
         uint8_t btransfer[16];
         hexStringToBytes(transfer_key, btransfer);
 
-        std::vector<uint8_t> frame_data = {0x3C}; // CMD_CHALLENGE_REQUEST's own cmd byte
-        frame_data.insert(frame_data.end(), motor_challenge, motor_challenge + 6); // ...followed by its own 6-byte challenge
+        // Two derivations of the IV data exist and the references disagree:
+        // - iv_from_key_init = true: the single byte of the KEY_INIT (0x31)
+        //   frame that opened the exchange. This is what
+        //   laberning/home_io_control uses; its key-extraction responder
+        //   received real keys from a Somfy TaHoma, a VELUX KLR 200 and a
+        //   KLF 200 with it (its recover_system_key_from_transfer()).
+        // - iv_from_key_init = false: the CHALLENGE_REQUEST's cmd byte (0x3C)
+        //   followed by its 6-byte challenge (nicolas5000/io-rts-esp32's
+        //   crypt_2w_key(), the form used here until 2026-11-27).
+        // The bonding attempt tries the first form first and the second form
+        // in its next round, so one test run covers both.
+        std::vector<uint8_t> frame_data;
+        if (iv_from_key_init) {
+            frame_data = {0x31};
+        } else {
+            frame_data = {0x3C};
+            frame_data.insert(frame_data.end(), motor_challenge, motor_challenge + 6);
+        }
         std::vector<uint8_t> iv = constructInitialValue(frame_data, motor_challenge, nullptr);
 
         uint8_t encrypted[16];

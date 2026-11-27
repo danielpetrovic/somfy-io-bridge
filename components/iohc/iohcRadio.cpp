@@ -211,6 +211,14 @@ namespace IOHC {
         Radio::setRx();
     }
 
+    void iohcRadio::recover_rx() {
+        if (radioState == RadioState::TX) return;
+        Radio::setStandby();
+        Radio::clearFlags();
+        Radio::setRx();
+        setRadioState(RadioState::RX);
+    }
+
     void iohcRadio::retune(uint32_t freq_hz) {
         // setCarrier(Frequency, ...) is explicitly safe to call while the
         // radio is active (SX1276's "fast hopping" - writing FRFLSB alone
@@ -362,9 +370,15 @@ void iohcRadio::startQueuedSend() {
 
     auto packet = packets2send[txCounter];
 
-    // 🟢 Set long preamble for first packet
-    Radio::setPreambleLength(LONG_PREAMBLE_MS);
-    ESP_LOGV(TAG, "TX: Using LONG preamble (%d ms)", LONG_PREAMBLE_MS);
+    // 🟢 Long wake-up preamble for the first packet, unless the packet asks for
+    // a specific start preamble (2W discovery, see iohcPacket::start_preamble).
+    if (packet->start_preamble != 0) {
+        Radio::setPreambleLength(packet->start_preamble);
+        ESP_LOGV(TAG, "TX: Using start preamble of %u symbols", packet->start_preamble);
+    } else {
+        Radio::setPreambleLength(LONG_PREAMBLE_MS);
+        ESP_LOGV(TAG, "TX: Using LONG preamble (%d ms)", LONG_PREAMBLE_MS);
+    }
 
     // Send first packet immediately
     Radio::setStandby();

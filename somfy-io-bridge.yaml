@@ -25,7 +25,7 @@ esphome:
   min_version: 2026.11.0
   project:
     name: "danielpetrovic.Somfy IO Bridge"
-    version: "1.0.2-2w3"
+    version: "1.0.2-2w5"
   # The vendored radio stack talks to the SX1276 directly via Arduino's SPI
   # library, and the Phase 2 pairing/command layer persists bonded remote
   # identities via Arduino's Preferences (NVS) library. Neither gets picked
@@ -405,6 +405,7 @@ switch:
       - logger.set_level: {level: VERY_VERBOSE, tag: iohc.packet}
       - logger.set_level: {level: VERY_VERBOSE, tag: iohc.crypto}
       - logger.set_level: {level: VERY_VERBOSE, tag: iohc.controller2w}
+      - logger.set_level: {level: VERY_VERBOSE, tag: iohc.key_extraction}
     turn_off_action:
       - logger.log:
           format: "Debug Logging turned OFF"
@@ -419,6 +420,7 @@ switch:
       - logger.set_level: {level: INFO, tag: iohc.packet}
       - logger.set_level: {level: INFO, tag: iohc.crypto}
       - logger.set_level: {level: INFO, tag: iohc.controller2w}
+      - logger.set_level: {level: INFO, tag: iohc.key_extraction}
   # Opportunistic background 3-channel RX hop (Finding 31/32) - deliberately
   # its own switch, separate from Debug Logging: this is about giving the
   # radio a shot at catching a rare bonding-key exchange on CH1/CH3, not
@@ -470,6 +472,35 @@ switch:
           format: "Confirm And Resend (2W) turned OFF"
           level: INFO
       - lambda: id(iohc_hub).set_confirm_resend_wanted(false);
+  # Recover System Key (2W). Emulates an unpaired device so your OWN existing
+  # hub (TaHoma, Connexoon, a Velux box) can pair to it through its normal
+  # "add a device" wizard and hand over the key it already shares with every
+  # motor it has bonded - nothing on any real motor is touched, no reset.
+  # While on, the bridge answers as a throwaway Somfy roller shutter; start
+  # the hub's add-device flow, let it run, then remove the phantom device it
+  # adds from the hub's own app. The recovered key is only logged (ESP_LOGW,
+  # "Recover System Key: SYSTEM KEY RECOVERED..."), never adopted
+  # automatically. Ported from github.com/laberning/home_io_control
+  # (MIT) and NOT yet tested against a real hub - verify a recovered key
+  # before trusting it. Auto-off after 10 minutes, or 1 minute after a
+  # successful extraction if the hub goes quiet. Defaults OFF and does not
+  # persist across a reboot - this exchanges real key material.
+  - platform: template
+    name: "Recover System Key (2W)"
+    icon: mdi:key-wireless
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    entity_category: config
+    turn_on_action:
+      - logger.log:
+          format: "Recover System Key (2W) turned ON"
+          level: WARN
+      - lambda: id(iohc_hub).key_extractor().set_armed(true);
+    turn_off_action:
+      - logger.log:
+          format: "Recover System Key (2W) turned OFF"
+          level: INFO
+      - lambda: id(iohc_hub).key_extractor().set_armed(false);
   # Diagnostic: stays OFF by default. Turns on the INFO log line for every
   # received frame (and the key-sniffer/bonding frame handling) on top of the
   # decoding that Confirm And Resend already switches on by itself. The

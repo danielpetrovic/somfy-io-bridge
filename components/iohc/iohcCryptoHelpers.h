@@ -86,7 +86,10 @@ namespace iohcCrypto {
     // captured KEY_TRANSFERT payload in place of a real system_key, it
     // recovers the real system_key instead (see IOHCController2W's passive
     // key-sniff state machine).
-    void build_key_transfert_response(const uint8_t *motor_challenge, const uint8_t *system_key, uint8_t *out_response16);
+    // iv_from_key_init selects which of the two IV derivations is used, see
+    // the comment at the definition. Default true (the KEY_INIT byte).
+    void build_key_transfert_response(const uint8_t *motor_challenge, const uint8_t *system_key, uint8_t *out_response16,
+                                      bool iv_from_key_init = true);
 
     // Builds a 6-byte CHALLENGE_ANSWER (0x3D) payload in response to a
     // device's CHALLENGE_REQUEST (0x3C) 6-byte challenge, authenticating
