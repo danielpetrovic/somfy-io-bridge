@@ -21,6 +21,7 @@
 #include <esp_attr.h>
 #include "esp_log.h"
 #include "iohc_utils.h"
+#include "iohc_log_buffer.h"
 #include <sstream>
 #include <iomanip>
 
@@ -357,7 +358,8 @@ else _dir[0] = ' ';
             }
         }
 
-        if (verbosity) ESP_LOGV(TAG, "%s", logbuf);
+        // A frame-log line: kept back while an exchange holds the log.
+        if (verbosity) frame_log_line(FrameLogLevel::VERBOSE, TAG, logbuf);
 
         relStamp = packetStamp;
     }

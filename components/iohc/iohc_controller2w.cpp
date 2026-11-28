@@ -17,6 +17,7 @@
 #include "iohc_controller2w.h"
 #include "iohc_2w_frame.h"
 #include "iohcCryptoHelpers.h"
+#include "iohc_log_buffer.h"
 #include "cover/iohc_cover.h"
 #include "iohc.h"
 #include "esphome/core/log.h"
@@ -597,7 +598,9 @@ namespace IOHC {
             const uint32_t wait_ms = std::min<uint32_t>(exchange_.due_ms - now, EXCHANGE_LISTEN_SLICE_MS);
             iohcPacket frame;
             if (owner_ == nullptr || !owner_->wait_for_frame(frame, wait_ms)) continue;
-            exchange_frame_(&frame);
+            // A frame the exchange ignores ends no quiet window, but the kept
+            // lines describe the past: printed now (dispatch_received_packet()).
+            if (!exchange_frame_(&frame)) frame_log_flush();
             if (owner_ != nullptr) owner_->defer_frame(frame, true);
         }
     }
@@ -608,10 +611,12 @@ namespace IOHC {
                 transmit_try_();
                 break;
             case ExchangePhase::WAIT_FIRST:
+                release_try_log_();
                 ESP_LOGI(TAG, "Try %u ended: no first response for cmd 0x%02X", exchange_.tries, exchange_.cmd);
                 next_try_();
                 break;
             case ExchangePhase::WAIT_FINAL:
+                release_try_log_();
                 try_ended_unconfirmed_();
                 break;
         }
@@ -666,8 +671,23 @@ namespace IOHC {
         if (gap_ms == 0) transmit_try_();
     }
 
+    void IOHCController2W::hold_try_log_() {
+        // Quiet window of one try: from before its transmit to the end of its
+        // last wait (frame_log_hold()).
+        if (exchange_.log_held) return;
+        exchange_.log_held = true;
+        frame_log_hold();
+    }
+
+    void IOHCController2W::release_try_log_() {
+        if (!exchange_.log_held) return;
+        exchange_.log_held = false;
+        frame_log_release();
+    }
+
     void IOHCController2W::transmit_try_() {
         Exchange &x = exchange_;
+        hold_try_log_();
         x.tries++;
         x.try_preamble = preamble_for_try_(x.tries);
         // End frames are only ever the device's: every request here opens or
@@ -685,6 +705,7 @@ namespace IOHC {
                 send_with_channel_access_(packet, x.try_preamble, wake_up, x.previous_freq, freq);
             x.previous_freq = freq;
             if (access == ChannelAccessStatus::CHANNEL_BUSY) {
+                release_try_log_();
                 ESP_LOGI(TAG, "Try %u ended: channel busy for cmd 0x%02X, nothing sent, last checked %lu Hz",
                          x.tries, x.cmd, static_cast<unsigned long>(freq));
                 next_try_();
@@ -751,6 +772,7 @@ namespace IOHC {
     }
 
     void IOHCController2W::end_exchange_(ExchangeOutcome outcome) {
+        release_try_log_();
         exchange_.active = false;
         if (job_ == PairJob::NONE && owner_ != nullptr) owner_->release_hop_plan();
         exchange_done_(outcome);
@@ -1423,6 +1445,7 @@ namespace IOHC {
             build_request_(inbound_.src, CMD_CHALLENGE_REQ, inbound_.challenge, sizeof(inbound_.challenge), false,
                            false, false);
         const uint8_t frame_len = challenge->buffer_length;
+        frame_log_hold();
         send_at_once_(challenge, inbound_.freq, RESPONSE_PREAMBLE_BYTES);
         inbound_.due_ms = esphome::millis() + tx_time_ms_(RESPONSE_PREAMBLE_BYTES, frame_len) + RESPONSE_WAIT_MS;
 
@@ -1435,7 +1458,9 @@ namespace IOHC {
             if (owner_ != nullptr) owner_->service_hop();
             const uint32_t now = esphome::millis();
             if (time_reached(now, inbound_.due_ms)) {
+                frame_log_release();
                 ESP_LOGW(TAG, "Status update from %s: no challenge answer", buf);
+                frame_log_hold();  // balanced by the release below
                 inbound_.active = false;
                 break;
             }
@@ -1444,6 +1469,7 @@ namespace IOHC {
             if (owner_ == nullptr || !owner_->wait_for_frame(frame, wait_ms)) continue;
             const bool answer = from_device_to_us_(&frame, inbound_.src) &&
                                 frame.payload.packet.header.cmd == CMD_CHALLENGE_RESP;
+            if (!answer) frame_log_flush();
             if (answer) {
                 const uint8_t len = frame.buffer_length > sizeof(_header)
                                         ? static_cast<uint8_t>(frame.buffer_length - sizeof(_header))
@@ -1464,6 +1490,7 @@ namespace IOHC {
             }
             wait_tx_idle_(STATUS_UPDATE_ACK_TX_WAIT_MS);
         }
+        frame_log_release();
         inbound_.active = false;
         if (!exchange_.active && job_ == PairJob::NONE && owner_ != nullptr) owner_->release_hop_plan();
         if (verified) apply_inbound_update_();
@@ -1529,19 +1556,25 @@ namespace IOHC {
     void IOHCController2W::run_job_() {
         // The pairing engine's listens: each step waits for its frames itself,
         // the receiver hopping as the step's plan says, until the job ends.
+        // The frame log is held while a step waits for the reply its transmit
+        // provoked; the kept lines are printed when the wait ends and when a
+        // frame the step ignores arrives.
+        frame_log_hold();
         while (job_ != PairJob::NONE) {
             radio_->startQueuedSend();
             if (owner_ != nullptr) owner_->service_hop();
             const uint32_t now = esphome::millis();
             if (step_ != PairStep::EXCHANGE && time_reached(now, step_due_ms_)) {
+                frame_log_flush();
                 on_step_due_();
                 continue;
             }
             iohcPacket frame;
             if (owner_ == nullptr || !owner_->wait_for_frame(frame, EXCHANGE_LISTEN_SLICE_MS)) continue;
-            handle_frame(&frame);
+            if (!handle_frame(&frame)) frame_log_flush();
             owner_->defer_frame(frame, true);
         }
+        frame_log_release();
     }
 
     void IOHCController2W::on_step_due_() {

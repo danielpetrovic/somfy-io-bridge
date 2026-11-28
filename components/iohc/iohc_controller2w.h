@@ -248,6 +248,7 @@ namespace IOHC {
             uint8_t reply_len{0};
             // COMMAND / STATUS_READ bookkeeping.
             bool is_stop{false};
+            bool log_held{false};  // this try holds the frame log
         } exchange_;
         bool start_exchange_(ExchangeFor what, const IOHC::address &dst, uint8_t cmd, const uint8_t *data,
                              uint8_t data_len, bool start_frame, bool low_power, const AttemptPlan &plan,
@@ -258,6 +259,9 @@ namespace IOHC {
         // A frame for the running exchange: true if it took it.
         bool exchange_frame_(IOHC::iohcPacket *packet);
         void next_try_();
+        // The frame log hold of one try (frame_log_hold()).
+        void hold_try_log_();
+        void release_try_log_();
         void transmit_try_();
         void answer_challenge_(const uint8_t *challenge6);
         void try_ended_unconfirmed_();
