@@ -30,8 +30,6 @@ static constexpr uint32_t IDLE_PREAMBLE_HOLD_MS = 30;
 static constexpr uint32_t IDLE_RENEW_REDETECT_MS = 4;
 static constexpr uint32_t IDLE_PREAMBLE_HOLD_CHAIN_MS = 300;
 static constexpr uint32_t RX_HOP_HOLDOFF_US = 12000;
-// A held plan (no hop) clears a PREAMBLE flag that no frame followed after this.
-static constexpr uint32_t STALE_PREAMBLE_MS = 30;
 static constexpr uint8_t QUIET_LEVEL_READING_EVERY_N_HOPS = 10;
 
 // A frame is queued by value (see on_receive()).
@@ -98,22 +96,34 @@ void IOHCComponent::maybe_hop_() {
   const bool idle_listen = rotating && !plan_override_;
 
   if (state == IOHC::iohcRadio::RadioState::TX) {
+    // A transmission ends whatever reception was held before it.
     sync_since_us_ = 0;
+    preamble_hold_active_ = false;
+    awaiting_redetect_ = false;
+    return;
+  }
+
+  // A held plan (an exchange's listen on its request channel, a status
+  // update's authentication, a pairing step that holds a channel) leaves the
+  // receiver alone for its whole window, like that component's holding listen
+  // (wait_for_packet()): no preamble hold, no restart. A restart there cut off
+  // the motor's reply to our challenge answer.
+  if (!rotating) {
+    sync_since_us_ = 0;
+    preamble_hold_active_ = false;
+    awaiting_redetect_ = false;
     return;
   }
 
   // A frame whose sync word arrived holds the channel, bounded by
   // RX_HOP_HOLDOFF_US so a sync with no frame behind it cannot wedge the hop
-  // (reception_in_progress()). That bound is the hop's: a held plan (an
-  // exchange's listen on its request channel) has no hop to unblock and,
-  // like that component's holding listen, leaves a reception alone, however
-  // long the frame takes to be read.
+  // (reception_in_progress()).
   if (state == IOHC::iohcRadio::RadioState::PAYLOAD) {
     preamble_hold_active_ = false;
     awaiting_redetect_ = false;
     if (sync_since_us_ == 0) {
       sync_since_us_ = now;
-    } else if (rotating && now - sync_since_us_ >= RX_HOP_HOLDOFF_US) {
+    } else if (now - sync_since_us_ >= RX_HOP_HOLDOFF_US) {
       IOHC::iohcRadio::getInstance()->recover_rx();
       stale_recoveries_++;
       sync_since_us_ = 0;
@@ -127,7 +137,6 @@ void IOHCComponent::maybe_hop_() {
   // IDLE_PREAMBLE_HOLD_MS slices, renewed on the same channel (receiver
   // restarted, IDLE_RENEW_REDETECT_MS to see the preamble again) up to
   // IDLE_PREAMBLE_HOLD_CHAIN_MS (laberning's PreambleHold::hold_renewing()).
-  // A held plan only clears a stale flag so it cannot freeze reception.
   const bool preamble_seen = state == IOHC::iohcRadio::RadioState::PREAMBLE;
   if (preamble_seen && !preamble_counted_) {
     preamble_counted_ = true;
@@ -136,7 +145,7 @@ void IOHCComponent::maybe_hop_() {
   if (!preamble_seen)
     preamble_counted_ = false;
   {
-    const uint32_t slice_ms = idle_listen ? IDLE_PREAMBLE_HOLD_MS : (rotating ? PREAMBLE_LINGER_DWELL_MS : STALE_PREAMBLE_MS);
+    const uint32_t slice_ms = idle_listen ? IDLE_PREAMBLE_HOLD_MS : PREAMBLE_LINGER_DWELL_MS;
     const uint32_t chain_ms = idle_listen ? IDLE_PREAMBLE_HOLD_CHAIN_MS : slice_ms;
     if (preamble_hold_active_) {
       if (now_ms - preamble_slice_start_ms_ < slice_ms)
