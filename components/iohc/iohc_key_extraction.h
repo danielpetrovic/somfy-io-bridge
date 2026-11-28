@@ -56,6 +56,7 @@
 #include <cstdint>
 #include "iohcPacket.h"
 #include "iohcRadio.h"
+#include "esphome/core/hal.h"
 
 namespace esphome {
 namespace iohc {
@@ -89,7 +90,36 @@ class IOHCKeyExtractor {
     // disarmed or for a frame not addressed to it.
     bool handle_frame(iohcPacket *packet);
 
+    // How loop() listens for the hub (laberning's listen_for_key_extraction_peer_()):
+    // while awaiting_reply(), it stays on session_freq() during
+    // in_session_hold(), else it listens on all three channels in blocking
+    // slices; otherwise the idle listening runs.
+    //
+    // True once the responder has answered and waits for the hub's next step,
+    // within the hold window (5 s per step, the grace minute after extraction).
+    bool awaiting_reply() const {
+        return state_ != ResponderState::DISARMED && state_ != ResponderState::ARMED_IDLE &&
+               static_cast<int32_t>(esphome::millis() - hold_deadline_ms_) < 0;
+    }
+    // Within the session window after the frame last answered: the hub's
+    // in-session frame comes on that frame's channel.
+    bool in_session_hold() const {
+        return awaiting_reply() && (esphome::millis() - session_rx_ms_) < SESSION_WINDOW_MS;
+    }
+    uint32_t session_freq() const { return session_freq_; }
+    // A discovery answer waiting for its slot, and the time left until it.
+    bool discover_reply_pending() const {
+        return discover_reply_pending_ && state_ == ResponderState::SENT_DISCOVER_RESP;
+    }
+    uint32_t ms_until_discover_reply() const {
+        const int32_t remaining = static_cast<int32_t>(discover_reply_due_ms_ - esphome::millis());
+        return remaining > 0 ? static_cast<uint32_t>(remaining) : 0;
+    }
+
  private:
+    // SESSION_HOLD_BASE_MS (35 ms) plus the turnaround of the advertised Multi
+    // Information Byte 0xDD (ATT class 3, 40 ms): key_extraction_session_window_ms().
+    static constexpr uint32_t SESSION_WINDOW_MS = 35 + 40;
     enum class ResponderState : uint8_t {
         DISARMED,
         ARMED_IDLE,             // listening for a hub's discovery (0x28)
@@ -113,7 +143,6 @@ class IOHCKeyExtractor {
     void send_reply_(iohcPacket *packet);
     void arm_grace_();
     void log_result_();
-    void listen_before_talk_();
 
     iohcRadio *radio_{nullptr};
     esphome::iohc::IOHCComponent *owner_{nullptr};
@@ -135,9 +164,14 @@ class IOHCKeyExtractor {
     IOHC::address discover_reply_dst_{};
     uint32_t discover_reply_freq_{CHANNEL2};
 
-    // Channel this session's replies go out/are held on, once the first
-    // one (the 0x29) has actually been sent.
+    // The frame being answered: its channel and arrival time. Answering it
+    // makes them the session's (send_reply_()).
+    uint32_t rx_freq_{CHANNEL2};
+    uint32_t rx_ms_{0};
     uint32_t session_freq_{CHANNEL2};
+    uint32_t session_rx_ms_{0};
+    // End of the current wait for the hub's next frame (awaiting_reply()).
+    uint32_t hold_deadline_ms_{0};
 };
 
 }  // namespace IOHC

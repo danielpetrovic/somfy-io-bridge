@@ -4,6 +4,7 @@
 #include "esphome/core/application.h"
 #include "cover/iohc_cover.h"
 #include "esp_timer.h"
+#include <algorithm>
 #include <type_traits>
 
 namespace esphome {
@@ -62,7 +63,18 @@ void IOHCComponent::loop() {
   // minute post-extraction grace, the deferred slotted discovery answer) -
   // see iohc_key_extraction.cpp's loop().
   key_extractor_.loop();
-  maybe_hop_();
+  // While the "Recover System Key" responder waits for the hub's next frame
+  // it listens for it (laberning's listen_for_key_extraction_peer_()); the
+  // idle listening runs otherwise.
+  if (key_extractor_.awaiting_reply()) {
+    listen_for_key_extraction_peer_();
+  } else {
+    if (responder_plan_set_) {
+      release_hop_plan();
+      responder_plan_set_ = false;
+    }
+    maybe_hop_();
+  }
   // Drains one queued send batch if the radio is idle and the minimum
   // inter-send cooldown has elapsed - see iohcRadio::startQueuedSend()'s own
   // comment. Also called directly from iohcRadio::send(), so this is what
@@ -223,7 +235,45 @@ void IOHCComponent::release_hop_plan() {
 
 void IOHCComponent::set_bonding_hop_wanted(bool wanted) { bonding_hop_wanted_ = wanted; }
 
-void IOHCComponent::set_responder_hop_wanted(bool wanted) { responder_hop_wanted_ = wanted; }
+// One listen slice of the responder's scan: long enough that the rest of the
+// loop pass is a small part of the time, short enough that other components
+// keep running (KEY_EXTRACTION_SCAN_SLICE_MS).
+static constexpr uint32_t KEY_EXTRACTION_SCAN_SLICE_MS = 200;
+
+void IOHCComponent::listen_for_key_extraction_peer_() {
+  responder_plan_set_ = true;
+  if (key_extractor_.in_session_hold()) {
+    // The hub answers on the session's channel within the session window,
+    // with a short preamble: the receiver waits there.
+    const uint32_t freq = key_extractor_.session_freq();
+    const bool held = plan_override_ && (hop_plan_ == HopPlan::HOLD_FREQ || hop_plan_ == HopPlan::HOLD_REQUEST);
+    if (!held || hop_freq_ != freq)
+      set_hop_plan(freq == CHANNEL2 ? HopPlan::HOLD_REQUEST : HopPlan::HOLD_FREQ, freq);
+    return;
+  }
+  // Outside the window the hub's next frame is a new request on any channel:
+  // a rotating listen over all three, staying on a channel while a preamble
+  // comes in. A discovery answer waiting for its slot is sent from loop(), so
+  // the slice ends by its slot.
+  uint32_t window_ms = KEY_EXTRACTION_SCAN_SLICE_MS;
+  if (key_extractor_.discover_reply_pending()) {
+    window_ms = std::min(window_ms, key_extractor_.ms_until_discover_reply());
+    if (window_ms == 0)
+      return;
+  }
+  set_hop_plan(HopPlan::ALL);
+  const uint32_t start_ms = esphome::millis();
+  while (esphome::millis() - start_ms < window_ms) {
+    maybe_hop_();
+    IOHC::iohcRadio::getInstance()->startQueuedSend();
+    IOHC::iohcPacket packet;
+    // Every frame ends the slice and goes through the normal receive path.
+    if (wait_for_frame(packet, 1)) {
+      process_frame_(&packet);
+      return;
+    }
+  }
+}
 
 bool IOHCComponent::on_receive(IOHC::iohcPacket *packet) {
   // CallbackTask: the radio stack deletes the packet after this returns, so

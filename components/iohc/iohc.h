@@ -114,7 +114,6 @@ class IOHCComponent : public Component {
   // applies to its one retune onto the reply channel. Tracked separately
   // from set_bonding_hop_wanted() so the two features' windows don't
   // interfere with each other's hop_plan_.
-  void set_responder_hop_wanted(bool wanted);
 
 
   // Confirm-and-resend (see IOHCCover::arm_confirmation_()): while on, received
@@ -166,7 +165,9 @@ class IOHCComponent : public Component {
   bool preamble_counted_{false};
   uint32_t last_hop_us_{0};
   bool bonding_hop_wanted_{false};
-  bool responder_hop_wanted_{false};
+  // The responder's listen holds the hop plan (listen_for_key_extraction_peer_()).
+  void listen_for_key_extraction_peer_();
+  bool responder_plan_set_{false};
   std::string fixed_controller_hex_;
   std::string fixed_system_key_hex_;
 

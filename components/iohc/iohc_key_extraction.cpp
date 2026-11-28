@@ -44,8 +44,15 @@ namespace {
 constexpr uint32_t AUTO_OFF_MS = 10UL * 60UL * 1000UL;        // 10 minute arm window.
 constexpr uint32_t POST_EXTRACT_GRACE_MS = 60UL * 1000UL;     // 1 minute after a successful extraction.
 constexpr uint8_t ID_GEN_MAX_ATTEMPTS = 16;                   // Collision-retry budget for the throwaway ID.
-constexpr uint16_t DISCOVER_RESP_PREAMBLE_SYMBOLS = 32;       // Peer is cold-scanning; needs the longer start preamble.
-constexpr uint16_t REPLY_PREAMBLE_SYMBOLS = 16;               // Peer already holds this channel open.
+// The 0x29 is the one reply a scanning peer has to catch cold:
+// cold_broadcast_reply_preamble_ms (20 ms = 77 bytes at 10 bits per byte).
+constexpr uint16_t DISCOVER_RESP_PREAMBLE_SYMBOLS = 77;
+// Every other reply lands on the channel the peer holds: the response
+// preamble (3.5 ms = 13 bytes), as every in-exchange reply here.
+constexpr uint16_t REPLY_PREAMBLE_SYMBOLS = 13;
+// Bounds the wait for the hub's next frame in the pre-extraction states
+// (KEY_EXTRACTION_MID_ATTEMPT_TIMEOUT_MS).
+constexpr uint32_t MID_ATTEMPT_TIMEOUT_MS = 5000;
 constexpr uint32_t DISCOVERY_SLOT_MS = 41;                    // One answer slot's length (laberning's measured value).
 constexpr uint8_t ADDRESS_SUFFIX_MASK = 0x3F;
 constexpr uint8_t ADDRESS_SUFFIX_DISCOVERY_64 = 0x3C;
@@ -113,10 +120,8 @@ void IOHCKeyExtractor::set_armed(bool armed) {
             return;
         state_ = ResponderState::DISARMED;
         discover_reply_pending_ = false;
-        if (owner_ != nullptr) {
+        if (owner_ != nullptr)
             owner_->release_hop_plan();
-            owner_->set_responder_hop_wanted(false);
-        }
         ESP_LOGI(TAG, "Recover System Key: disarmed");
         return;
     }
@@ -128,38 +133,28 @@ void IOHCKeyExtractor::set_armed(bool armed) {
     state_ = ResponderState::ARMED_IDLE;
     armed_until_ms_ = esphome::millis() + AUTO_OFF_MS;
     session_freq_ = CHANNEL2;
-
-    if (owner_ != nullptr) {
-        // Idle wait: stay on CH2, same as this bridge's own discovery
-        // broadcasts and TaHoma's own are expected to use (Findings
-        // this project already relies on elsewhere: "commands are sent on
-        // CH2"). No hop needed to catch it.
-        owner_->set_hop_plan(esphome::iohc::IOHCComponent::HopPlan::HOLD_REQUEST);
-        owner_->set_responder_hop_wanted(true);
-    }
+    hold_deadline_ms_ = esphome::millis();
+    // Waiting for the hub's search: the idle listening over all three
+    // channels, as that component's loop() does before anything is answered.
+    if (owner_ != nullptr)
+        owner_->release_hop_plan();
 
     ESP_LOGW(TAG,
              "Recover System Key: ARMED for 10 minutes as throwaway device %02X%02X%02X. Start adding a new "
-             "device on your existing hub (TaHoma: Settings > Devices > add a Somfy device) now. Remove the "
-             "phantom device it adds afterward.",
+             "device on your existing hub (TaHoma: Settings > Devices > add a Somfy device) now; on TaHoma "
+             "pick a Smoove-type control point, a \"remote control\" makes it wait instead of searching. Remove "
+             "the phantom device it adds afterward.",
              throwaway_id_[0], throwaway_id_[1], throwaway_id_[2]);
 }
 
-void IOHCKeyExtractor::listen_before_talk_() {
-    // Same ETSI EN 300 220-style check IOHCController2W::listen_before_talk()
-    // uses before every 2W transmission - duplicated here rather than shared,
-    // since that one is a private method of a different class.
-    for (uint8_t i = 0; i < 5; i++) {
-        float rssi = Radio::readRssi();
-        if (rssi < -90.0f) return;
-        esphome::delay(5);
-    }
-}
-
 void IOHCKeyExtractor::send_reply_(iohcPacket *packet) {
-    // An answer to a frame addressed to us goes out at once on the session
-    // channel, without listen-before-talk or the radio's inter-send gap
-    // (laberning/home_io_control's responder does the same).
+    // The frame being answered opens (or continues) the session on its
+    // channel: the hub waits there for our answer, and its in-session
+    // follow-up comes on the same channel. The answer goes out once, at
+    // once, without channel access or the radio's inter-send gap.
+    session_freq_ = rx_freq_;
+    session_rx_ms_ = rx_ms_;
+    packet->frequency = session_freq_;
     packet->skip_send_gap = true;
     radio_->retune(session_freq_);
     radio_->send(packet);
@@ -172,6 +167,9 @@ bool IOHCKeyExtractor::handle_frame(iohcPacket *packet) {
         return false;  // 1W frame, not ours.
 
     uint8_t cmd = packet->payload.packet.header.cmd;
+    // Kept for the handler that answers this frame (send_reply_()).
+    rx_freq_ = packet->frequency != 0 ? packet->frequency : CHANNEL2;
+    rx_ms_ = esphome::millis();
 
     if (cmd == 0x28) {
         handle_discover_(packet);
@@ -244,6 +242,12 @@ void IOHCKeyExtractor::handle_discover_(iohcPacket *packet) {
     discover_reply_freq_ = freq;
     discover_reply_pending_ = true;
     discover_reply_due_ms_ = esphome::millis() + delay_ms;
+    // The session opens only with the confirm that follows, on any channel:
+    // no session hold, but the hub is listened for through the slot and its
+    // confirm.
+    session_freq_ = rx_freq_;
+    session_rx_ms_ = rx_ms_ - SESSION_WINDOW_MS;
+    hold_deadline_ms_ = esphome::millis() + delay_ms + MID_ATTEMPT_TIMEOUT_MS;
     ESP_LOGI(TAG, "Recover System Key: hub %02X%02X%02X is searching - answering in slot %u/%u (%u ms) on %lu Hz",
              hub_src[0], hub_src[1], hub_src[2], static_cast<unsigned>(slot), static_cast<unsigned>(slots),
              static_cast<unsigned>(delay_ms), static_cast<unsigned long>(freq));
@@ -276,19 +280,15 @@ void IOHCKeyExtractor::send_discover_resp_now_() {
     resp.timestamp[1] = 0x0E;
     packet->buffer_length = packet->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
     packet->start_preamble = DISCOVER_RESP_PREAMBLE_SYMBOLS;
+    packet->frequency = discover_reply_freq_;
+    packet->skip_send_gap = true;
 
-    session_freq_ = discover_reply_freq_;
-    radio_->retune(session_freq_);
-    listen_before_talk_();
+    // A timed transmission on one of the two channels the search did not
+    // come in on, sent as is; the hub's confirm may come on any channel.
+    radio_->retune(discover_reply_freq_);
     radio_->send(packet);
-    // Hold this channel for the rest of the session - the hub's follow-up
-    // frames (0x2C, then 0x31...) are expected back on it, matching every
-    // unicast pairing reply this project has measured elsewhere.
-    if (owner_ != nullptr) {
-        owner_->set_hop_plan(esphome::iohc::IOHCComponent::HopPlan::HOLD_FREQ, session_freq_);
-    }
     ESP_LOGI(TAG, "Recover System Key: sent DISCOVER_RESP (0x29) to %02X%02X%02X on %lu Hz", discover_reply_dst_[0],
-             discover_reply_dst_[1], discover_reply_dst_[2], static_cast<unsigned long>(session_freq_));
+             discover_reply_dst_[1], discover_reply_dst_[2], static_cast<unsigned long>(discover_reply_freq_));
 }
 
 void IOHCKeyExtractor::handle_discover_confirm_(const IOHC::address &hub_src) {
@@ -302,6 +302,7 @@ void IOHCKeyExtractor::handle_discover_confirm_(const IOHC::address &hub_src) {
     packet->buffer_length = packet->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
     packet->start_preamble = REPLY_PREAMBLE_SYMBOLS;
     send_reply_(packet);
+    hold_deadline_ms_ = esphome::millis() + MID_ATTEMPT_TIMEOUT_MS;
     ESP_LOGI(TAG, "Recover System Key: acknowledged DISCOVER_CONFIRM (0x2C) from %02X%02X%02X", hub_src[0],
              hub_src[1], hub_src[2]);
 }
@@ -332,6 +333,7 @@ void IOHCKeyExtractor::handle_key_init_(const IOHC::address &hub_src) {
     packet->buffer_length = packet->payload.packet.header.CtrlByte1.asStruct.MsgLen + 1;
     packet->start_preamble = REPLY_PREAMBLE_SYMBOLS;
     send_reply_(packet);
+    hold_deadline_ms_ = esphome::millis() + MID_ATTEMPT_TIMEOUT_MS;
     ESP_LOGI(TAG, "Recover System Key: sent CHALLENGE_REQ (0x3C) to %02X%02X%02X%s", hub_src[0], hub_src[1],
              hub_src[2], resend_only ? " (retry)" : "");
 }
@@ -427,7 +429,11 @@ void IOHCKeyExtractor::handle_node_verify_challenge_(iohcPacket *packet) {
              src[0], src[1], src[2]);
 }
 
-void IOHCKeyExtractor::arm_grace_() { grace_until_ms_ = esphome::millis() + POST_EXTRACT_GRACE_MS; }
+void IOHCKeyExtractor::arm_grace_() {
+    grace_until_ms_ = esphome::millis() + POST_EXTRACT_GRACE_MS;
+    // The hub may still verify this device: the grace minute bounds the wait.
+    hold_deadline_ms_ = grace_until_ms_;
+}
 
 void IOHCKeyExtractor::log_result_() {
     // Deliberate exception to this bridge's usual practice of never logging
