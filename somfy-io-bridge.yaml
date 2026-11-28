@@ -25,7 +25,7 @@ esphome:
   min_version: 2026.11.0
   project:
     name: "danielpetrovic.Somfy IO Bridge"
-    version: "1.0.2-2w18"
+    version: "1.0.2-2w19"
   # The vendored radio stack talks to the SX1276 directly via Arduino's SPI
   # library, and the Phase 2 pairing/command layer persists bonded remote
   # identities via Arduino's Preferences (NVS) library. Neither gets picked
@@ -224,6 +224,8 @@ packages:
       node: !secret io_bedroom_left_shutter_node
       key: !secret io_bedroom_left_shutter_key
       motor_address: !secret io_bedroom_left_shutter_motor_address
+      low_power: "true"
+      status_refresh_interval: 60min
   bedroom_middle_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -232,6 +234,8 @@ packages:
       node: !secret io_bedroom_middle_shutter_node
       key: !secret io_bedroom_middle_shutter_key
       motor_address: !secret io_bedroom_middle_shutter_motor_address
+      low_power: "true"
+      status_refresh_interval: 60min
   bedroom_right_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -240,6 +244,8 @@ packages:
       node: !secret io_bedroom_right_shutter_node
       key: !secret io_bedroom_right_shutter_key
       motor_address: !secret io_bedroom_right_shutter_motor_address
+      low_power: "true"
+      status_refresh_interval: 60min
   gameroom_left_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -248,6 +254,8 @@ packages:
       node: !secret io_gameroom_left_shutter_node
       key: !secret io_gameroom_left_shutter_key
       motor_address: !secret io_gameroom_left_shutter_motor_address
+      low_power: "true"
+      status_refresh_interval: 60min
   gameroom_right_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -256,6 +264,8 @@ packages:
       node: !secret io_gameroom_right_shutter_node
       key: !secret io_gameroom_right_shutter_key
       motor_address: !secret io_gameroom_right_shutter_motor_address
+      low_power: "true"
+      status_refresh_interval: 60min
   garden_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -264,6 +274,7 @@ packages:
       node: !secret io_garden_shutter_node
       key: !secret io_garden_shutter_key
       motor_address: !secret io_garden_shutter_motor_address
+      status_refresh_interval: 5min
   gym_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -272,6 +283,8 @@ packages:
       node: !secret io_gym_shutter_node
       key: !secret io_gym_shutter_key
       motor_address: !secret io_gym_shutter_motor_address
+      low_power: "true"
+      status_refresh_interval: 60min
   hallway_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -280,6 +293,8 @@ packages:
       node: !secret io_hallway_shutter_node
       key: !secret io_hallway_shutter_key
       motor_address: !secret io_hallway_shutter_motor_address
+      low_power: "true"
+      status_refresh_interval: 60min
   kitchen_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -288,6 +303,7 @@ packages:
       node: !secret io_kitchen_shutter_node
       key: !secret io_kitchen_shutter_key
       motor_address: !secret io_kitchen_shutter_motor_address
+      status_refresh_interval: 5min
   living_room_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -305,6 +321,8 @@ packages:
       node: !secret io_office_shutter_node
       key: !secret io_office_shutter_key
       motor_address: !secret io_office_shutter_motor_address
+      low_power: "true"
+      status_refresh_interval: 60min
   roof_terrace_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -313,6 +331,7 @@ packages:
       node: !secret io_roof_terrace_shutter_node
       key: !secret io_roof_terrace_shutter_key
       motor_address: !secret io_roof_terrace_shutter_motor_address
+      status_refresh_interval: 5min
   shed_alleyway_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -321,6 +340,7 @@ packages:
       node: !secret io_shed_alleyway_shutter_node
       key: !secret io_shed_alleyway_shutter_key
       motor_address: !secret io_shed_alleyway_shutter_motor_address
+      status_refresh_interval: 5min
   shed_garden_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -329,6 +349,8 @@ packages:
       node: !secret io_shed_garden_shutter_node
       key: !secret io_shed_garden_shutter_key
       motor_address: !secret io_shed_garden_shutter_motor_address
+      low_power: "true"
+      status_refresh_interval: 60min
 
 # Onboard SSD1306 128x64 OLED (same pins/model as the RTS bridge)
 i2c:
@@ -450,7 +472,7 @@ switch:
       - logger.set_level: {level: INFO, tag: iohc.crypto}
       - logger.set_level: {level: INFO, tag: iohc.controller2w}
       - logger.set_level: {level: INFO, tag: iohc.key_extraction}
-  # Confirm And Resend (1W), for covers in Position (1W) mode only (Two-Way
+  # Confirm And Resend (1W), for covers in One-Way mode only (Two-Way
   # covers confirm every command in the 2W exchange itself). A 1W command gets
   # no reply, but the motor's status answer (overheard when TaHoma polls it,
   # about 35 s after the command) carries its real position. With this on,

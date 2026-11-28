@@ -1,14 +1,11 @@
 """Somfy IO (io-homecontrol) per-cover mode select.
 
-Switches one cover between "Position (1W)" (default - the only mode that
-sends arbitrary percentage targets to the motor; the displayed position
-while moving is a cosmetic local travel-time estimate only, see
-IOHCCover::Mode) and "Two-Way (2W)" (real 2W commands to an actually-bonded
-motor - the control path is implemented, but this bridge's own bonding
-(Program (2W)) has never yet completed successfully against real hardware,
-so in practice every command currently gets refused with a warning until
-that happens). Labels follow this project's existing Program (1W)/
-Program (2W) naming. See IOHCCover::Mode in cover/iohc_cover.h.
+Switches one cover between "One-Way" (default: 1W commands as this bridge's
+own 1W remote, the position estimated from the travel time) and "Two-Way"
+(2W commands to a motor paired to this bridge, confirmed by the motor, with
+its real position). The other entities' (1W)/(2W) suffixes name the mode
+they belong to. The mode is stored as a number, so renaming these labels
+keeps every cover's saved mode. See IOHCCover::Mode in cover/iohc_cover.h.
 
 A third mode, "Open / My / Close" (RTS-bridge-style 3-state discrete
 position, no time tracking, no arbitrary percentages), was removed
@@ -37,7 +34,7 @@ CONF_COVER_ID = "cover_id"
 
 IOHCModeSelect = iohc_ns.class_("IOHCModeSelect", select.Select, cg.Component)
 
-MODE_OPTIONS = ["Position (1W)", "Two-Way (2W)"]
+MODE_OPTIONS = ["One-Way", "Two-Way"]
 
 CONFIG_SCHEMA = select.select_schema(IOHCModeSelect).extend(
     {

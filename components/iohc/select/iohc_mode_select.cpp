@@ -6,7 +6,7 @@ namespace iohc {
 
 static const char *const TAG = "iohc.mode_select";
 
-// MODE_OPTIONS (select/__init__.py) is ["Position", "Two-Way (Experimental)"],
+// MODE_OPTIONS (select/__init__.py) is ["One-Way", "Two-Way"],
 // no longer index-aligned with IOHCCover::Mode's numeric values (removing
 // the old middle option, "Open / My / Close", broke that) - map explicitly
 // in both directions instead of casting. By the time this runs, the cover's

@@ -14,7 +14,7 @@ Drives the board's onboard SX1276 radio directly at the register level (no ESPHo
 
 Somfy IO (io-homecontrol) is a different protocol on a different frequency from Somfy RTS (one-way, rolling code). If your motor/remote actually speaks RTS instead, see [`somfy-rts-bridge`](https://github.com/danielpetrovic/somfy-rts-bridge) - check your motor/remote's own documentation (or the frequency printed on it) to know which protocol it actually speaks.
 
-**Status**: Stable for 1W (one-way) control - real-world daily use across 14 physical shutters. 2W (two-way) control/position-feedback is implemented but this bridge's own 2W bonding has never yet succeeded against real hardware - see [2W bonding: current status and open problem](#2w-bonding-current-status-and-open-problem) below.
+**Status**: Stable for 1W (one-way) control - real-world daily use across 14 physical shutters. 2W (two-way) control with real position feedback works on mains-powered Somfy io motors paired to this bridge (tested on two), ported from [`laberning/home_io_control`](https://github.com/laberning/home_io_control) - see [Two-Way (2W)](#two-way-2w) below.
 
 ### Cover device classes
 
@@ -99,7 +99,7 @@ Install it in Home Assistant first: Settings → Apps → search "ESPHome" → I
    - **Every flash after that** (updates): choose "Wirelessly" instead - no USB needed, once the board is already on your Wi-Fi.
    - After a successful first flash, the board announces itself to Home Assistant automatically - go to Settings → Devices & Services, an "ESPHome" discovery card should appear; click **Configure** and enter the `io_bridge_api_key` value from `secrets.yaml` the one time it's needed.
 8. **Pair each cover to its motor** (see below).
-9. **Test**: Open/Close/Stop from the cover's card in Home Assistant. The mode `select` defaults to `Position (1W)`, which supports real percentage targets - see [Modes](#modes).
+9. **Test**: Open/Close/Stop from the cover's card in Home Assistant. The mode `select` defaults to `One-Way`, which supports real percentage targets - see [Modes](#modes).
 
 ## Pairing (and unpairing) a cover to its motor
 
@@ -219,18 +219,18 @@ Generated the same way (`secrets.token_hex(3)`/`secrets.token_hex(16)`, or the t
 ## Modes
 
 Each cover has a `select:` entity to switch between:
-- **`Position (1W)`** (default) - the only mode that can send arbitrary percentage targets to the motor. An explicit percentage (confirmed via passive 2W read-back across multiple physical devices/percentages) or a full Open/Close reaching the motor's own mechanical end-stop both land exactly where expected regardless of the travel-time animation's accuracy along the way - see [Travel time](#travel-time) below. A manual **Stop** partway through a move is the one exception: this bridge never gets real position feedback over 1W, so whatever's displayed and persisted afterward is exactly wherever the travel-time estimate happened to be at that instant, not a real reading - see [Travel time](#travel-time) for why that estimate's accuracy still matters here.
-- **`Two-Way (2W)`** - real 2W commands to an actually-bonded motor. The control path (per-command challenge/response, position feedback) is implemented and validated against real captured frames. This bridge's own bonding has never yet succeeded against real hardware, though - see [2W bonding: current status and open problem](#2w-bonding-current-status-and-open-problem) below for the full picture. Selecting this mode on an unbonded motor just logs a warning and ignores commands.
+- **`One-Way`** (default) - the only mode that can send arbitrary percentage targets to the motor. An explicit percentage (confirmed via passive 2W read-back across multiple physical devices/percentages) or a full Open/Close reaching the motor's own mechanical end-stop both land exactly where expected regardless of the travel-time animation's accuracy along the way - see [Travel time](#travel-time) below. A manual **Stop** partway through a move is the one exception: this bridge never gets real position feedback over 1W, so whatever's displayed and persisted afterward is exactly wherever the travel-time estimate happened to be at that instant, not a real reading - see [Travel time](#travel-time) for why that estimate's accuracy still matters here.
+- **`Two-Way`** - real 2W commands to a motor paired to this bridge: every command is confirmed by the motor, and Home Assistant shows the motor's real position and direction. See [Two-Way (2W)](#two-way-2w) below for pairing. A motor that is not paired to this bridge refuses its commands (the log says `refused with 0x80`).
 
-Labels follow this project's existing `Program (1W)`/`Program (2W)` naming (renamed from `Position`/`Two-Way (Experimental)` 2026-11-27).
+The other entities' `(1W)`/`(2W)` suffixes (`Program (1W)`, `Travel Time Open (1W)`, `Program (2W)`, ...) name the mode they belong to. The options were called `Position (1W)`/`Two-Way (2W)` before; the mode is stored as a number, so every cover keeps its mode, but an automation that selects an option by its text needs the new names.
 
-A third mode, `Open / My / Close` (three discrete states, no time tracking, no arbitrary percentages, ported over from the RTS bridge's own default model), was removed 2026-11-27 - unused, with no install ever confirmed running a cover in it. A cover whose saved mode was still set to it migrates to `Position (1W)` the next time it boots.
+A third mode, `Open / My / Close` (three discrete states, no time tracking, no arbitrary percentages, ported over from the RTS bridge's own default model), was removed 2026-11-27 - unused, with no install ever confirmed running a cover in it. A cover whose saved mode was still set to it migrates to `One-Way` the next time it boots.
 
 ## Travel time
 
 Each cover has **Travel Time Open**/**Travel Time Close** number entities (config entities, seconds) controlling how long the local position estimate takes to run from one extreme to the other. One fixed 25s value couldn't fit every installation (GitHub issue #4 - real stopwatch data showed one axis taking 45s against a 25s model, and another taking 12-15s, on the same board, errors running in opposite directions at once).
 
-This matters differently depending on [mode](#modes) and how a move actually ends. In `Position (1W)`, an explicit percentage or a full Open/Close that reaches the real end-stop both land exactly where expected no matter how accurate the animation was along the way, since the motor itself is the source of truth there - purely cosmetic in that case. But a manual **Stop** partway through a move never gets a real position back from the motor at all (no feedback over 1W), so the value shown and persisted afterward is exactly whatever this estimate computed at that instant - a mistuned value means that's a genuinely wrong number, not just a wrong animation.
+This matters differently depending on [mode](#modes) and how a move actually ends. In `One-Way`, an explicit percentage or a full Open/Close that reaches the real end-stop both land exactly where expected no matter how accurate the animation was along the way, since the motor itself is the source of truth there - purely cosmetic in that case. But a manual **Stop** partway through a move never gets a real position back from the motor at all (no feedback over 1W), so the value shown and persisted afterward is exactly whatever this estimate computed at that instant - a mistuned value means that's a genuinely wrong number, not just a wrong animation.
 
 Starts from the `travel_time_open`/`travel_time_close` YAML substitutions (default 25s each) on first-ever boot; once changed from Home Assistant, the choice persists on the device and the YAML default no longer applies, same mechanism as [Tilt Support](#tilt-support-switch). Both values are always in Home Assistant's own space (what "open" means to HA) regardless of [Direction inversion](#direction-inversion) below - the component handles mapping that onto the motor's real physical direction internally, so a value entered here never needs to be swapped by hand when Invert Direction is toggled.
 
@@ -240,21 +240,40 @@ Some installations have both motor axes wired or configured so this bridge's own
 
 Each cover has an **Invert Direction** switch (config entity) for exactly this - on swaps which command actually gets sent for Open/Close, and mirrors the local position estimate and any real 2W position feedback back to Home Assistant's own convention, so the entity reports the same orientation it accepts. Starts from the `invert` YAML substitution (default `false`) on first-ever boot; once toggled from Home Assistant, the choice persists on the device and the YAML default no longer applies, same mechanism as [Tilt Support](#tilt-support-switch). `Stop` and `My`/`Set My` are unaffected either way - both are direction-agnostic commands. [Travel time](#travel-time)'s open/close values are also unaffected from your point of view - they stay in Home Assistant's own space either way, the component remaps them internally.
 
-## 2W bonding: current status and open problem
+## Two-Way (2W)
 
-This bridge's own 2W bonding (`Program (2W)` - becoming a real independent controller for a motor, rather than just overhearing an existing box's traffic) has never yet succeeded against real hardware, despite substantial engineering effort across many sessions. This section documents what's been built, what's been ruled out, and why the underlying obstacle is still unresolved.
+In `Two-Way` mode this bridge is the motor's 2W controller, the role a TaHoma box plays: it commands the motor under its own system key, the motor confirms every command, and the bridge reads the motor's real position. The 2W engine is a port of [`laberning/home_io_control`](https://github.com/laberning/home_io_control)'s (exchange, retries, channel access, pairing, status polling).
 
-**What's implemented**: a full bonding state machine (`iohc_controller2w.*`) that actively broadcasts `DISCOVER` (`0x28`), and on a response, drives the real key-exchange sequence (`KEY_INIT`/`0x31` → `CHALLENGE_REQUEST`/`0x3C` → `KEY_TRANSFER`/`0x32` → `CHALLENGE_ANSWER`/`0x3D`), plus a required `DISCOVER_CONFIRMATION` (`0x2C`→`0x2D`) step. The frame construction and crypto (AES-ECB IV/challenge-response) were independently verified byte-for-byte against two separate, real working implementations - [`laberning/home_io_control`](https://github.com/laberning/home_io_control) and [`nicolas5000/io-rts-esp32`](https://github.com/nicolas5000/io-rts-esp32) - not just against upstream's own more exploratory reference code. Listen-Before-Talk RF collision avoidance and a fast (~900µs/channel) 3-channel RX hop were also added, matching those references' own documented behavior. A passive key-sniffer (watching for `0x31`→`0x3C`→`0x32` from any source, not just this bridge's own attempts) was built to try to recover an already-established key from an existing box's own bonding traffic instead.
+### Pairing a motor
 
-**The obstacle**: every real bonding attempt against real hardware - including tests with an independently-confirmed-open pairing window, correct channel, working collision avoidance, and byte-identical frames to a genuine TaHoma broadcast captured on the same install - gets zero response to the initial `DISCOVER` broadcast.
+Requirements:
+- The cover's `motor_address`: the motor's own 3-byte address. With a TaHoma or Connexoon it is the Overkiz device's address in Home Assistant; it also shows in this bridge's log whenever the motor answers (`... to XXXXXX refused with 0x80` before pairing).
+- A battery or solar motor also needs `low_power: "true"` (it is woken with the long preamble).
 
-**This isn't unique to this project.** Both reference implementations document the same real-world requirement: a device already bonded to another box (TaHoma, Connexoon, etc.) will not answer a new controller's discovery/bonding attempt while that bond exists. `nicolas5000/io-rts-esp32`'s own README states this explicitly as the intended workflow for its own key-extraction feature - remove the device from the box's app, **fully reset the device** (forgetting all previous pairings), re-pair a physical remote, *then* re-pair the box - only that genuine, fresh re-pairing event produces a capturable key transfer. `laberning/home_io_control`'s own config also expects to be handed an existing hub's Node ID/System Key directly if a device was previously paired elsewhere, rather than attempting to derive it independently.
+Steps:
+1. Press **PROG once** on the motor's own remote (select its channel first on a multi-channel remote) and hold until the motor jogs. Its pairing window stays open for about 10 minutes. Do not press PROG a second time: that can close the window or remove the remote.
+2. Press the cover's **`Program (2W)`** button. With a `motor_address` it pairs that motor by its address (laberning's `pair_device`); the log ends with `Device XXXXXX took the key and is paired to this bridge`. The `pair_device` action does the same from Home Assistant.
+3. Set the cover's **Mode** to `Two-Way`.
 
-**What this project has tried, following that same recipe, without success**: removing a shutter from TaHoma, a genuine factory reset (Double Power Cut - see [Factory-resetting a motor](#factory-resetting-a-motor-double-power-cut) above), re-pairing a 1-way remote, and re-adding the device through TaHoma's own app - the same sequence the reference project documents as sufficient. TaHoma **has** successfully re-bonded to a freshly-reset motor this way, confirmed multiple times, but the actual key-transfer exchange (`0x31`/`0x32`/`0x33`) was never captured in any of those attempts, despite the passive key-sniffer running throughout. Whether that's a timing/channel gap in the sniffer, or something about this specific motor generation/firmware that differs from what the reference authors tested against, is unresolved.
+What pairing changes:
+- The motor now holds this bridge's system key instead of its previous hub's. That hub (TaHoma, Connexoon, ...) can no longer command or read it; remove the device from the hub's app if you want, the motor ignores it. Re-adding it in the hub's app gives the hub its key back, and this bridge then needs the cover set back to `One-Way`.
+- The motor's physical 1W remotes keep working.
+- `Scan Paired Devices (2W)` lists every motor that holds this bridge's key.
 
-**Bottom line**: this bridge can only reliably control a motor over 1W. Becoming a real independent 2W controller - bonding with a motor itself, without relying on TaHoma/Connexoon at all - remains unsolved. There is currently no passive-decode fallback either (see "Removed" under [Scope and status](#scope-and-status) below) - real position feedback for this bridge is blocked entirely on 2W bonding actually working.
+### In use
 
-If you've made progress on this, or have a working real bonding capture from a different motor generation/firmware, please open an issue - this is the single biggest open question in this project.
+- A command shows opening or closing at once; while the motor moves, its position is read every 3 s until it reports itself at rest. A command that gets no answer is retried (as in laberning's component) and logged as a warning if it still fails.
+- Each Two-Way cover is read 5 s after boot, so Home Assistant shows its real position after a restart.
+- `status_refresh_interval` (per cover, off by default, at least `1min`) reads the motor whenever it has reported nothing for that long, so a move made with a physical remote shows up within the interval. `5min` suits a mains motor; a battery motor is woken by every read, so use an hour or more, or leave it off.
+- The `Try ... (heard X preamble(s), Y frame(s))` log lines say whether a missing reply arrived corrupted (a preamble, no frame) or not at all.
+
+### Known limitations
+
+- **Discover & Pair** (`Program (2W)` without a `motor_address`): the Somfy io motors tested here never answer a discovery broadcast, even with their pairing window open, so pairing needs the `motor_address`.
+- **Recover System Key** (taking over an existing hub's key, so motors need no re-pairing): implemented, but against a TaHoma Switch the hub has not yet gone past the device announcement. Not working yet.
+- A move made with a physical remote shows in Home Assistant only at the next read; reading the motor right after a remote press (laberning's linked remotes) is not ported yet.
+- While a 2W exchange runs the bridge does nothing else, up to 2.5 s for a command (the same as laberning's component).
+- Pairing a battery (low-power) motor has not been tested yet.
 
 ## Broadcast type caveat
 
@@ -268,19 +287,19 @@ If you've made progress on this, or have a working real bonding capture from a d
 - Open / Close / Stop / My / absolute Position (0-100%) commands, confirmed working against real hardware. My and Stop are distinct commands - see [My and Set My](#my-and-set-my) above for My's two real, per-cover-selectable frame shapes ([Tilt Support switch](#tilt-support-switch)).
 - `Set My`, reprogramming the motor's own stored favorite position to the cover's current physical position - both patterns confirmed working end-to-end on real hardware, see [My and Set My](#my-and-set-my) above.
 - Identify / Start Identify / Stop Identify (`cmd=0x1E`) - best-guess frames, confirmed working against real hardware, see [Identify](#identify) above.
-- Per-cover selectable mode (`Position (1W)` / `Two-Way (2W)` - control path implemented, but this bridge's own 2W bonding has not yet succeeded against real hardware, see [Modes](#modes) above).
+- Per-cover selectable mode (`One-Way` / `Two-Way`, see [Modes](#modes) above).
 - Per-cover Invert Direction switch, for installations where this bridge's own Open/Close convention comes out physically backwards from Home Assistant's - see [Direction inversion](#direction-inversion) above.
 - Per-cover configurable travel time (Travel Time Open/Close number entities), replacing a single fixed 25s value that couldn't fit every installation - see [Travel time](#travel-time) above.
 - 1W TX now recovers on its own if a transmission's completion is never confirmed (missed interrupt, stuck radio flag), instead of leaving the radio keyed indefinitely until power-cycled.
 
 All of the above confirmed working against real motors, including pairing/unpairing multiple physical shutters end-to-end.
 
-**Implemented but not yet working (2W bonding):**
-- **This bridge's own 2W bonding and control.** The real AES challenge/response + key-transfer bonding ceremony, and per-command 2W control, are both implemented and byte-verified against two independent working reference implementations - but bonding has never yet succeeded against real hardware. See [2W bonding: current status and open problem](#2w-bonding-current-status-and-open-problem) above for the full picture.
+**Implemented (2W, two-way):**
+- Pairing a motor to this bridge by its address, confirmed 2W commands, real position and direction, the read after boot and the optional status refresh, ported from `laberning/home_io_control` and confirmed on two mains-powered Somfy io motors - see [Two-Way (2W)](#two-way-2w) above, including its known limitations.
 
 **Removed:**
 - **Target Closure sensor** - removed: a Two-Way cover reports its real position itself, and Confirm And Resend takes the overheard current position over into a Position (1W) cover. The `Debug Passive Decode (2W)` and `Debug Channel Hop (2W)` switches are removed too: received frames are always decoded, and the receiver always rotates over the three channels.
-- **`Open / My / Close` mode** - a third select option (three discrete states, no time tracking) ported over from the RTS bridge's own default model. Removed 2026-11-27 as unused; no install was ever confirmed running a cover in it. A cover whose saved mode was still set to it migrates to `Position (1W)` at its next boot.
+- **`Open / My / Close` mode** - a third select option (three discrete states, no time tracking) ported over from the RTS bridge's own default model. Removed 2026-11-27 as unused; no install was ever confirmed running a cover in it. A cover whose saved mode was still set to it migrates to `One-Way` at its next boot.
 
 ## Files
 
@@ -290,7 +309,7 @@ All of the above confirmed working against real motors, including pairing/unpair
   - Flat directory (no subdirectories except `cover/`, `button/`, `select/`, `switch/`, `number/`) - matches both git-source's auto-detection (`components/` at the repo root) and, historically, the only structure ESPHome's local-component loader supports, if you ever switch back to `type: local` for local development - see the comment in `iohc.h` for why.
   - `iohcRadio.*`, `iohcPacket.*`, `SX1276Helpers.*`, `sx1276Regs-Fsk.h`, `TickerUsESP32.*`, `Delegate.h`: vendored radio/protocol layer, near-verbatim from upstream.
   - `iohc_remote1w.*`: the command/pairing layer (Add/Remove/Open/Close/Stop/Vent/SetMy/Position/Identify), rewritten around ESPHome's `Preferences`-backed persistence instead of upstream's JSON-file + MQTT model.
-  - `iohc_blind_position.*`: the local travel-time position estimator, per-cover configurable (default 25s open/close, see [Travel time](#travel-time)), used for the cosmetic "still moving" animation in `Position (1W)` mode (see [Modes](#modes)).
+  - `iohc_blind_position.*`: the local travel-time position estimator, per-cover configurable (default 25s open/close, see [Travel time](#travel-time)), used for the cosmetic "still moving" animation in `One-Way` mode (see [Modes](#modes)).
   - `cover/`, `button/`, `select/`, `switch/`, `number/`: the ESPHome platform integration. `button/`, `switch/`, and `number/` each dispatch multiple entity types via their own `type:` field (switch: Tilt Support/Invert Direction; number: Travel Time Open/Close); `select/` implements one entity type (Mode).
 
 ## OLED display
@@ -310,7 +329,7 @@ Not a from-scratch reimplementation - built on other people's protocol reverse-e
 This bridge's own SX1276 driver and 1W layer (`iohcRadio.*`, `iohcPacket.*`, `SX1276Helpers.*`, `iohc_remote1w.*`) were ported near-verbatim from one source; its 2W bonding/control logic (`iohc_controller2w.*`) was independently corrected and verified against two different, separate sources. These are genuinely different lineages, not "based on rspaargaren" as a whole - see the table below for how the four projects actually relate.
 
 - **Radio driver and 1W layer** ported from [`rspaargaren/iohomecontrol`](https://github.com/rspaargaren/iohomecontrol) (Apache-2.0) - a standalone Arduino/PlatformIO firmware for the same SX1276 radio chip, with real working 1W pairing/commands (its own 2W path is explicitly disclaimed by its author as no longer stable). That project itself builds on [`Velocet/iown-homecontrol`](https://github.com/Velocet/iown-homecontrol) (protocol documentation and reverse-engineering, largely reconstructed from decompiled TaHoma/Cozytouch firmware) and [`cridp/iown-homecontrol-esp32sx1276`](https://github.com/cridp/iown-homecontrol-esp32sx1276) (SX1276 register handling for this exact radio chip).
-- **2W bonding/control logic** (`iohc_controller2w.h`/`.cpp`) was corrected against [`laberning/home_io_control`](https://github.com/laberning/home_io_control) (MIT) - a mature, independently-tested ESPHome IO-Homecontrol component with confirmed real 2W pairing on the same SX1276 chip family. Its documented protocol sequence (controller-initiated discovery/key-exchange, and the two-key system_key/transfer_key model) corrected a wrong directionality assumption and a crypto bug this project's own earlier bonding attempts carried over from `rspaargaren`'s more exploratory reference code - no code was copied verbatim, only the confirmed protocol/algorithm understanding.
+- **2W engine** (`iohc_controller2w.*`, the 2W parts of `iohc.cpp`, `iohc_key_extraction.*`, the frame log hold in `iohc_log_buffer.*`, and the Two-Way cover state in `cover/iohc_cover.*`) is ported from [`laberning/home_io_control`](https://github.com/laberning/home_io_control) (MIT, Copyright (c) 2026-present Lars Berning and other contributors): its exchange engine (send-and-receive, attempt plans, retries, channel access with a learned busy limit, the low-power wake belief), its pairing engine and roll-call, its idle listening, its status polling and refresh, its key extraction responder and its frame log hold, rewritten for this bridge's radio stack.
 - Also cross-checked against [`nicolas5000/io-rts-esp32`](https://github.com/nicolas5000/io-rts-esp32) (Apache-2.0) - a second, independent working 2W implementation (and itself the project `laberning/home_io_control` is built on, per its own Acknowledgments), used to add the required `DISCOVER_CONFIRMATION` (`0x2C`→`0x2D`) bonding step neither this project nor `laberning/home_io_control` had, add Listen-Before-Talk RF collision avoidance, and fix a second crypto bug in the key-transfer IV construction. Again, no code copied verbatim - only the confirmed protocol/algorithm details.
 - The vendored/ported files live in `components/iohc/` with their original copyright headers intact - see the comment at the top of each file for what was ported near-verbatim versus rewritten for ESPHome (also summarized under [Files](#files) above).
 
@@ -326,18 +345,20 @@ If you've come across any of these separately and are wondering how they compare
 | Radio driver | Original | Original | Built on nicolas5000 | Ported from rspaargaren¹ |
 | 1W bonding | Implemented, unsupported | Passive-only² | Passive-only² | **Implemented, stable** |
 | 1W control | Implemented | Not implemented | Not implemented | **Implemented, stable** |
-| 2W bonding | Implemented, "unstable" | **Confirmed working** | **Confirmed working** | Implemented, not yet working |
-| 2W control | Implemented | **Confirmed, w/ position** | **Confirmed, w/ position** | Implemented, blocked on bonding |
-| Scope | Broad - 1W+2W, OLED, web | Broad - 2W, CLI, Ethernet | Broad - multi-device, tilt | 1W stable; 2W blocked³ |
+| 2W bonding | Implemented, "unstable" | **Confirmed working** | **Confirmed working** | **Confirmed working** (by address) |
+| 2W control | Implemented | **Confirmed, w/ position** | **Confirmed, w/ position** | **Confirmed, w/ position** |
+| Scope | Broad - 1W+2W, OLED, web | Broad - 2W, CLI, Ethernet | Broad - multi-device, tilt | 1W stable; 2W ported from laberning³ |
 
 ¹ Same "layered origin" pattern as laberning building on nicolas5000 - see above, not a claim this repo copies rspaargaren wholesale.
 ² Only passively overhears 1W traffic (nicolas5000: to extract remote IDs/site keys; laberning: to fire HA automation events) - neither actively bonds/controls over 1W.
-³ This repo's 1W mode is `Position (1W)`; 2W is `Two-Way (2W)` - see [Modes](#modes). 2W control is implemented and byte-verified against both nicolas5000 and laberning, but blocked entirely on bonding, which has never succeeded here - see [status](#2w-bonding-current-status-and-open-problem).
+³ This repo's modes are `One-Way` (1W) and `Two-Way` (2W) - see [Modes](#modes) and [Two-Way (2W)](#two-way-2w).
 
-The practical upshot: none of the three reference projects offer stable 1W bonding/control the way this one does (rspaargaren has it but disclaims support for it; the other two skip it entirely and only listen passively) - that's this project's own strongest, most-tested feature. Conversely, both `nicolas5000/io-rts-esp32` and `laberning/home_io_control` have working 2W bonding today; this repository's own 2W bonding attempt has not yet succeeded against real hardware despite the corrected protocol/crypto - if working 2W matters to you right now, either of those two has actually achieved it.
+The practical upshot: none of the three reference projects offer stable 1W bonding/control the way this one does (rspaargaren has it but disclaims support for it; the other two skip it entirely and only listen passively) - that's this project's own strongest, most-tested feature. Its 2W side is a port of `laberning/home_io_control`'s, so for 2W features beyond covers (heaters, sensors, linked remotes and more), that component is the reference.
 
 Only the protocol/radio-level pieces were ported from rspaargaren/iohomecontrol specifically (packet framing, CRC/AES handling, position estimation, the 1W command/pairing layer); its MQTT layer, web server, and Arduino `main.cpp` structure were not, and its 2W logic was independently rebuilt against the other two sources instead of being ported from rspaargaren at all - this repository's bridge runs entirely inside ESPHome's own component/lifecycle model.
 
 ## License
 
 Apache License 2.0 - see [LICENSE](LICENSE).
+
+The 2W engine contains code ported from [`laberning/home_io_control`](https://github.com/laberning/home_io_control), MIT License, Copyright (c) 2026-present Lars Berning and other contributors - see [LICENSES/MIT-home_io_control.txt](LICENSES/MIT-home_io_control.txt). The files it applies to say so in their header.

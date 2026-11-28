@@ -9,7 +9,7 @@
 
 The former `target_closure` type is removed: a Two-Way cover reports its real
 position itself, and Confirm And Resend takes the overheard current position
-over into a Position (1W) cover.
+over into a One-Way cover.
 """
 
 import esphome.codegen as cg

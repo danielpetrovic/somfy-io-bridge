@@ -1,3 +1,10 @@
+/*
+   Portions of this file are ported from laberning/home_io_control
+   (https://github.com/laberning/home_io_control), MIT License,
+   Copyright (c) 2026-present Lars Berning and other contributors.
+   See LICENSES/MIT-home_io_control.txt.
+ */
+
 #include "iohc_cover.h"
 #include "esphome/core/log.h"
 #include "../iohcCryptoHelpers.h"
@@ -297,7 +304,7 @@ void IOHCCover::on_2w_command_failed(bool was_stop) {
 }
 
 void IOHCCover::set_mode(Mode mode) {
-  // Position (1W) estimates from its tracker: start it from the shown
+  // One-Way estimates from its tracker: start it from the shown
   // position, or loop() would publish whatever the tracker held before.
   if (mode == Mode::POSITION && mode_ != Mode::POSITION) {
     float raw_position = invert_ ? (1.0f - this->position) : this->position;
@@ -402,7 +409,7 @@ void IOHCCover::dump_config() {
   LOG_COVER("", "Somfy IOHC Cover", this);
   ESP_LOGCONFIG(TAG, "  Paired: %s", remote_.is_paired() ? "yes" : "no");
   const char *mode_name =
-      mode_ == Mode::POSITION ? "Position (1W)" : "Two-Way (2W)";
+      mode_ == Mode::POSITION ? "One-Way" : "Two-Way";
   ESP_LOGCONFIG(TAG, "  Mode: %s", mode_name);
   ESP_LOGCONFIG(TAG, "  Invert Direction: %s", invert_ ? "yes" : "no");
   ESP_LOGCONFIG(TAG, "  Travel time open/close: %lus / %lus", travel_time_open_, travel_time_close_);
@@ -428,7 +435,24 @@ void IOHCCover::press_my() {
   this->publish_state();
 }
 
-void IOHCCover::press_prog2w() { parent_->controller2w().discover_and_pair(); }
+void IOHCCover::press_prog2w() {
+  // laberning/home_io_control's two pairing routes: a declared device is
+  // paired by its address (pair_device), the key exchange straight to the
+  // motor during its pairing window; only a cover without a motor_address
+  // falls back to Discover & Pair. Somfy io motors already paired to another
+  // hub do not answer a discovery, even with their window open.
+  if (has_motor_address_) {
+    char hex[7];
+    snprintf(hex, sizeof(hex), "%02x%02x%02x", motor_address_[0], motor_address_[1], motor_address_[2]);
+    ESP_LOGI(TAG, "%s: Program (2W) pairs motor %s by its address; its pairing window must be open",
+             LOG_STR_ARG(this->get_log_name()), hex);
+    parent_->controller2w().pair_device(hex);
+    return;
+  }
+  ESP_LOGI(TAG, "%s: Program (2W) without a motor_address: searching (Discover & Pair)",
+           LOG_STR_ARG(this->get_log_name()));
+  parent_->controller2w().discover_and_pair();
+}
 
 void IOHCCover::control(const cover::CoverCall &call) {
   if (mode_ == Mode::TWO_WAY) {

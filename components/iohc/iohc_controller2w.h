@@ -14,6 +14,13 @@
    limitations under the License.
  */
 
+/*
+   Portions of this file are ported from laberning/home_io_control
+   (https://github.com/laberning/home_io_control), MIT License,
+   Copyright (c) 2026-present Lars Berning and other contributors.
+   See LICENSES/MIT-home_io_control.txt.
+ */
+
 // This bridge acting as a 2W controller (the role TaHoma plays), ported from
 // laberning/home_io_control:
 //   - PairingEngine (pairing_engine.cpp): discover_and_pair(),
