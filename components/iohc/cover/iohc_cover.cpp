@@ -291,6 +291,16 @@ void IOHCCover::on_2w_report(std::optional<float> current_closure, std::optional
   this->publish_state();
 }
 
+void IOHCCover::on_battery_level(uint8_t level) {
+  // A mains motor reports no level: both entities stay without a state.
+  if (level == 0 || level > 3)
+    return;
+  if (battery_low_sensor_ != nullptr)
+    battery_low_sensor_->publish_state(level == 1);
+  if (battery_state_sensor_ != nullptr)
+    battery_state_sensor_->publish_state(level == 1 ? "low" : (level == 2 ? "normal" : "full"));
+}
+
 void IOHCCover::on_2w_command_failed(bool was_stop) {
   if (was_stop && stop_pending_) {
     // The stop did not get through: the movement it replaced goes on.

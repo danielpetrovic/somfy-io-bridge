@@ -5,6 +5,8 @@
 #include "esphome/core/component.h"
 #include "esphome/components/cover/cover.h"
 #include "esphome/components/sensor/sensor.h"
+#include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 #include "../iohc.h"
 #include "../iohc_remote1w.h"
 #include <Preferences.h>
@@ -168,6 +170,13 @@ class IOHCCover : public cover::Cover, public Component {
   // property of the reception, so a misdecoded payload cannot corrupt it.
   void update_last_rssi(float rssi_dbm);
   void set_last_rssi_sensor(sensor::Sensor *s) { last_rssi_sensor_ = s; }
+  // battery: true (laberning/home_io_control's Battery Low and Battery).
+  void set_battery_low_sensor(binary_sensor::BinarySensor *s) { battery_low_sensor_ = s; }
+  void set_battery_state_sensor(text_sensor::TextSensor *s) { battery_state_sensor_ = s; }
+  bool has_battery_sensors() const { return battery_low_sensor_ != nullptr || battery_state_sensor_ != nullptr; }
+  // A coarse battery level from a Two-Way status report (BatteryState:
+  // 1 low, 2 normal, 3 full; 0 is no level, a mains motor).
+  void on_battery_level(uint8_t level);
 
  protected:
   void control(const cover::CoverCall &call) override;
@@ -217,6 +226,8 @@ class IOHCCover : public cover::Cover, public Component {
   // Direction of travelling from one closure to another (operation_toward()).
   cover::CoverOperation operation_toward_(float from_closure, float to_closure) const;
   sensor::Sensor *last_rssi_sensor_{nullptr};
+  binary_sensor::BinarySensor *battery_low_sensor_{nullptr};
+  text_sensor::TextSensor *battery_state_sensor_{nullptr};
 
   // Confirm-and-resend (switch "Confirm And Resend (1W)"). A 1W command gets
   // no reply, but the motor's status answer, overheard when TaHoma polls it

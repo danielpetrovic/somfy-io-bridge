@@ -264,6 +264,7 @@ What pairing changes:
 
 - A command shows opening or closing at once; while the motor moves, its position is read every 3 s until it reports itself at rest. A command that gets no answer is retried (as in laberning's component) and logged as a warning if it still fails.
 - Each Two-Way cover is read 5 s after boot, so Home Assistant shows its real position after a restart.
+- `battery: "true"` (per cover) adds a **Battery Low** binary sensor (device class battery, so low-battery notifications pick it up) and a **Battery** text sensor (full / normal / low, disabled by default), from the coarse level a battery or solar motor puts in every status reply and status update. Nothing extra is sent. A mains motor reports no level; its entities then stay without a state and the log says so once. Every `Device ...: stopped/moving` log line shows `battery=`.
 - `status_refresh_interval` (per cover, off by default, at least `1min`) reads the motor whenever it has reported nothing for that long, so a move made with a physical remote shows up within the interval. `5min` suits a mains motor; a battery motor is woken by every read, so use an hour or more, or leave it off.
 - The `Try ... (heard X preamble(s), Y frame(s))` log lines say whether a missing reply arrived corrupted (a preamble, no frame) or not at all.
 

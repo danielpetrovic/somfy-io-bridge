@@ -123,6 +123,9 @@ namespace IOHC {
         uint32_t last_status_ms{0};
         bool confirms_execute{false};
         bool reports_remaining_time{false};
+        // Coarse battery level (BatteryState), 0xFF until a report gave one.
+        uint8_t battery_level{0xFF};
+        bool battery_absent_logged{false};
         // The last "stopped" report off its own target (StopCandidate), raw.
         bool stop_candidate_armed{false};
         uint16_t stop_candidate_target{0};
@@ -302,7 +305,8 @@ namespace IOHC {
         // optional remaining time) to the cover and plans the follow-up read.
         void apply_status_report_(Session2W &s, const IOHC::address &motor, uint8_t status_byte,
                                   std::optional<uint16_t> target, std::optional<uint16_t> current,
-                                  std::optional<uint16_t> remaining_s, bool trusted_poll);
+                                  std::optional<uint16_t> remaining_s, bool trusted_poll,
+                                  std::optional<uint8_t> battery_byte = std::nullopt);
 
         // --- Device-originated status updates (hub_status.cpp, challenge_sender()) ---
         // A 0x71 to this bridge is authenticated first: our 0x3C, the device's

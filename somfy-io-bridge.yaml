@@ -25,7 +25,7 @@ esphome:
   min_version: 2026.11.0
   project:
     name: "danielpetrovic.Somfy IO Bridge"
-    version: "1.0.2-2w19"
+    version: "1.0.2-2w20"
   # The vendored radio stack talks to the SX1276 directly via Arduino's SPI
   # library, and the Phase 2 pairing/command layer persists bonded remote
   # identities via Arduino's Preferences (NVS) library. Neither gets picked
@@ -226,6 +226,7 @@ packages:
       motor_address: !secret io_bedroom_left_shutter_motor_address
       low_power: "true"
       status_refresh_interval: 60min
+      battery: "true"
   bedroom_middle_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -236,6 +237,7 @@ packages:
       motor_address: !secret io_bedroom_middle_shutter_motor_address
       low_power: "true"
       status_refresh_interval: 60min
+      battery: "true"
   bedroom_right_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -246,6 +248,7 @@ packages:
       motor_address: !secret io_bedroom_right_shutter_motor_address
       low_power: "true"
       status_refresh_interval: 60min
+      battery: "true"
   gameroom_left_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -256,6 +259,7 @@ packages:
       motor_address: !secret io_gameroom_left_shutter_motor_address
       low_power: "true"
       status_refresh_interval: 60min
+      battery: "true"
   gameroom_right_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -266,6 +270,7 @@ packages:
       motor_address: !secret io_gameroom_right_shutter_motor_address
       low_power: "true"
       status_refresh_interval: 60min
+      battery: "true"
   garden_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -285,6 +290,7 @@ packages:
       motor_address: !secret io_gym_shutter_motor_address
       low_power: "true"
       status_refresh_interval: 60min
+      battery: "true"
   hallway_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -295,6 +301,7 @@ packages:
       motor_address: !secret io_hallway_shutter_motor_address
       low_power: "true"
       status_refresh_interval: 60min
+      battery: "true"
   kitchen_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -323,6 +330,7 @@ packages:
       motor_address: !secret io_office_shutter_motor_address
       low_power: "true"
       status_refresh_interval: 60min
+      battery: "true"
   roof_terrace_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -351,6 +359,7 @@ packages:
       motor_address: !secret io_shed_garden_shutter_motor_address
       low_power: "true"
       status_refresh_interval: 60min
+      battery: "true"
 
 # Onboard SSD1306 128x64 OLED (same pins/model as the RTS bridge)
 i2c:

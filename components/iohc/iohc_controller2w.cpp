@@ -199,6 +199,20 @@ namespace IOHC {
         }
     }
 
+    // BatteryState (decode_battery_state()): byte 1 of a status reply or
+    // update, bits 5-6.
+    static constexpr uint8_t STATUS_BATTERY_MASK = 0x60;
+    static constexpr uint8_t STATUS_BATTERY_SHIFT = 5;
+    static const char *battery_state_name(uint8_t level) {
+        switch (level) {
+            case 1: return "low";
+            case 2: return "normal";
+            case 3: return "full";
+            case 0: return "not_reported";
+            default: return "unknown";
+        }
+    }
+
     static bool has_reached_target_position(uint16_t target, uint16_t position) {
         const uint16_t gap = target > position ? target - position : position - target;
         return gap <= STATUS_POS_TOLERANCE_RAW;
@@ -1389,18 +1403,41 @@ namespace IOHC {
                                        d[PRIVATE_RESPONSE_REMAINING_TIME_OFFSET + 1];
             if (remaining != PRIVATE_RESPONSE_REMAINING_TIME_NONE) remaining_s = remaining;
         }
-        apply_status_report_(s, exchange_.dst, d[0], target, current, remaining_s, trust_position);
+        // Only a reply to a status poll is a status report (apply_battery_state()).
+        std::optional<uint8_t> battery_byte;
+        if (trust_position && len >= 2) battery_byte = d[1];
+        apply_status_report_(s, exchange_.dst, d[0], target, current, remaining_s, trust_position, battery_byte);
     }
 
     void IOHCController2W::apply_status_report_(Session2W &s, const IOHC::address &motor, uint8_t status_byte,
                                                 std::optional<uint16_t> target, std::optional<uint16_t> current,
-                                                std::optional<uint16_t> remaining_s, bool trusted_poll) {
+                                                std::optional<uint16_t> remaining_s, bool trusted_poll,
+                                                std::optional<uint8_t> battery_byte) {
         const uint32_t now = esphome::millis();
         const bool reported_stopped = reads_stopped_by_status_byte(status_byte);
         s.last_status_ms = now;
         note_status_reported_(s);
         char buf[7];
         addr_str(motor, buf);
+
+        // apply_battery_state(): the coarse battery level; a change is worth an
+        // INFO line, a motor without one explains itself once.
+        if (battery_byte.has_value()) {
+            const uint8_t level = (*battery_byte & STATUS_BATTERY_MASK) >> STATUS_BATTERY_SHIFT;
+            if (level == 0) {
+                if (s.battery_level != 0xFF && s.battery_level != 0)
+                    ESP_LOGI(TAG, "Device %s: battery %s -> %s", buf, battery_state_name(s.battery_level),
+                             battery_state_name(level));
+                if (!s.battery_absent_logged && s.cover != nullptr && s.cover->has_battery_sensors())
+                    ESP_LOGI(TAG, "Device %s reports no battery state; it is probably mains powered", buf);
+                s.battery_absent_logged = true;
+            } else if (level != s.battery_level) {
+                ESP_LOGI(TAG, "Device %s: battery %s -> %s", buf, battery_state_name(s.battery_level),
+                         battery_state_name(level));
+            }
+            s.battery_level = level;
+            if (s.cover != nullptr) s.cover->on_battery_level(level);
+        }
 
         // decode_position_report(): only 0x0000-0xC800 is a position; a stop
         // or named-position code in the target field is no target.
@@ -1454,13 +1491,14 @@ namespace IOHC {
                 snprintf(target_text, sizeof(target_text), "%.1f%%", *target / 512.0f);
             else
                 snprintf(target_text, sizeof(target_text), "none");
+            const char *battery = battery_state_name(s.battery_level);
             if (current.has_value())
-                ESP_LOGI(TAG, "Device %s: %s (%s), current %.1f%% closed, target %s closed", buf,
+                ESP_LOGI(TAG, "Device %s: %s (%s), current %.1f%% closed, target %s closed, battery=%s", buf,
                          at_rest ? "stopped" : "moving", execution_state_name(status_byte), *current / 512.0f,
-                         target_text);
+                         target_text, battery);
             else
-                ESP_LOGI(TAG, "Device %s: %s (%s), no position, target %s", buf, at_rest ? "stopped" : "moving",
-                         execution_state_name(status_byte), target_text);
+                ESP_LOGI(TAG, "Device %s: %s (%s), no position, target %s, battery=%s", buf,
+                         at_rest ? "stopped" : "moving", execution_state_name(status_byte), target_text, battery);
             if (s.cover != nullptr)
                 s.cover->on_2w_report(current.has_value() ? std::optional<float>(*current / 512.0f) : std::nullopt,
                                       target.has_value() ? std::optional<float>(*target / 512.0f) : std::nullopt,
@@ -1646,7 +1684,8 @@ namespace IOHC {
                                  d[STATUS_UPDATE_CURRENT_OFFSET + 1];
         Session2W &s = sessions_[pack_address(inbound_.src)];
         ESP_LOGI(TAG, "Status update from %s (authenticated)", buf);
-        apply_status_report_(s, inbound_.src, d[0], target, current, std::nullopt, false);
+        apply_status_report_(s, inbound_.src, d[0], target, current, std::nullopt, false,
+                             std::optional<uint8_t>(d[1]));
     }
 
     // --- loop / handle_frame ---

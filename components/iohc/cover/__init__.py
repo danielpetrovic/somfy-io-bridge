@@ -21,13 +21,22 @@ import re
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import cover
-from esphome.const import CONF_DEVICE_CLASS, CONF_ID
+from esphome.components import binary_sensor, cover, text_sensor
+from esphome.const import (
+    CONF_DEVICE_CLASS,
+    CONF_DEVICE_ID,
+    CONF_DISABLED_BY_DEFAULT,
+    CONF_ID,
+    CONF_NAME,
+    DEVICE_CLASS_BATTERY,
+    ENTITY_CATEGORY_DIAGNOSTIC,
+)
 
 from .. import IOHCComponent, iohc_ns
 
 CODEOWNERS = ["@danielpetrovic"]
 DEPENDENCIES = ["iohc"]
+AUTO_LOAD = ["binary_sensor", "text_sensor"]
 
 CONF_IOHC_ID = "iohc_id"
 CONF_BROADCAST_TYPE = "broadcast_type"
@@ -37,6 +46,9 @@ CONF_KEY = "key"
 CONF_MOTOR_ADDRESS = "motor_address"
 CONF_LOW_POWER = "low_power"
 CONF_STATUS_REFRESH_INTERVAL = "status_refresh_interval"
+CONF_BATTERY = "battery"
+CONF_BATTERY_LOW = "battery_low"
+CONF_BATTERY_STATE = "battery_state"
 CONF_MY_PATTERN = "my_pattern"
 CONF_INVERT = "invert"
 CONF_TRAVEL_TIME_OPEN = "travel_time_open"
@@ -65,8 +77,38 @@ def _validate_refresh_interval(value):
     return value
 
 
-CONFIG_SCHEMA = cover.cover_schema(IOHCCover, device_class="shutter").extend(
+def _battery_entities(config):
+    """battery: true creates laberning/home_io_control's two battery entities
+    (Battery Low, Battery) under the cover's own device, unless given
+    explicitly."""
+    if not cv.boolean(config.get(CONF_BATTERY, False)):
+        return config
+    config = dict(config)
+    low = {CONF_NAME: "Battery Low"}
+    state = {CONF_NAME: "Battery", CONF_DISABLED_BY_DEFAULT: True}
+    if CONF_DEVICE_ID in config:
+        low[CONF_DEVICE_ID] = config[CONF_DEVICE_ID]
+        state[CONF_DEVICE_ID] = config[CONF_DEVICE_ID]
+    config.setdefault(CONF_BATTERY_LOW, low)
+    config.setdefault(CONF_BATTERY_STATE, state)
+    return config
+
+
+CONFIG_SCHEMA = cv.All(_battery_entities, cover.cover_schema(IOHCCover, device_class="shutter").extend(
     {
+        # Two-Way mode: publish the coarse battery level a battery or solar
+        # motor includes in every status reply (byte 1, bits 5-6: full,
+        # normal or low), as laberning/home_io_control's `battery: true`:
+        # a Battery Low binary sensor and a Battery text sensor (disabled by
+        # default). Nothing extra goes over the radio. A mains motor reports
+        # no level and both stay without a state.
+        cv.Optional(CONF_BATTERY, default=False): cv.boolean,
+        cv.Optional(CONF_BATTERY_LOW): binary_sensor.binary_sensor_schema(
+            device_class=DEVICE_CLASS_BATTERY, entity_category=ENTITY_CATEGORY_DIAGNOSTIC
+        ),
+        cv.Optional(CONF_BATTERY_STATE): text_sensor.text_sensor_schema(
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC, icon="mdi:battery"
+        ),
         cv.GenerateID(CONF_IOHC_ID): cv.use_id(IOHCComponent),
         # Broadcast group the motor listens on (see sDevicesType in
         # iohc_utils.h) - default 0 ("All") matches upstream's own default,
@@ -153,7 +195,7 @@ CONFIG_SCHEMA = cover.cover_schema(IOHCCover, device_class="shutter").extend(
         cv.Optional(CONF_TRAVEL_TIME_OPEN, default=25): cv.int_range(min=1, max=120),
         cv.Optional(CONF_TRAVEL_TIME_CLOSE, default=25): cv.int_range(min=1, max=120),
     }
-).extend(cv.COMPONENT_SCHEMA)
+).extend(cv.COMPONENT_SCHEMA))
 
 
 async def to_code(config):
@@ -179,6 +221,12 @@ async def to_code(config):
         cg.add(var.set_motor_address(config[CONF_MOTOR_ADDRESS]))
     cg.add(var.set_low_power_2w(config[CONF_LOW_POWER]))
     cg.add(var.set_status_refresh_interval_ms(config[CONF_STATUS_REFRESH_INTERVAL].total_milliseconds))
+    if CONF_BATTERY_LOW in config:
+        low = await binary_sensor.new_binary_sensor(config[CONF_BATTERY_LOW])
+        cg.add(var.set_battery_low_sensor(low))
+    if CONF_BATTERY_STATE in config:
+        state = await text_sensor.new_text_sensor(config[CONF_BATTERY_STATE])
+        cg.add(var.set_battery_state_sensor(state))
 
     my_pattern = config[CONF_MY_PATTERN]
     if my_pattern == "auto":

@@ -36,6 +36,8 @@
 # whenever it has reported none for that long, so a move made elsewhere
 # shows up within the interval: "0s" (off) or at least "1min"; "5min" suits
 # a mains motor, a battery motor every hour or more, or not at all.
+# `battery` (Two-Way mode only) adds Battery Low and Battery entities with
+# the coarse battery level a battery or solar motor reports in every status.
 substitutions:
   cover_id: "changeme"
   cover_name: "Change Me"
@@ -46,6 +48,7 @@ substitutions:
   motor_address: ""
   low_power: "false"
   status_refresh_interval: "0s"
+  battery: "false"
   my_pattern: "auto"
   invert: "false"
   travel_time_open: "25"
@@ -69,6 +72,7 @@ cover:
     motor_address: ${motor_address}
     low_power: ${low_power}
     status_refresh_interval: ${status_refresh_interval}
+    battery: ${battery}
     my_pattern: ${my_pattern}
     invert: ${invert}
     travel_time_open: ${travel_time_open}
