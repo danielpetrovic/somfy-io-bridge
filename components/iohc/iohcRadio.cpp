@@ -35,6 +35,8 @@ namespace IOHC {
     volatile bool iohcRadio::send_lock = false;
     volatile iohcRadio::RadioState iohcRadio::radioState = iohcRadio::RadioState::IDLE;
     volatile bool iohcRadio::txComplete = false;
+    volatile uint32_t iohcRadio::preambles_detected = 0;
+    volatile uint32_t iohcRadio::frames_completed = 0;
 
 
     TaskHandle_t handle_interrupt;
@@ -86,9 +88,14 @@ namespace IOHC {
             //    ets_printf("TX: TXDONE detected, flag set\n");
             //    iohcRadio::setRadioState(iohcRadio::RadioState::RX);
             //} else {
+                if (iohcRadio::radioState != iohcRadio::RadioState::TX &&
+                    iohcRadio::radioState != iohcRadio::RadioState::PAYLOAD)
+                    iohcRadio::frames_completed = iohcRadio::frames_completed + 1;
                 iohcRadio::setRadioState(iohcRadio::RadioState::PAYLOAD);
             //}
         } else if (preamble) {
+            if (iohcRadio::radioState != iohcRadio::RadioState::PREAMBLE)
+                iohcRadio::preambles_detected = iohcRadio::preambles_detected + 1;
             iohcRadio::setRadioState(iohcRadio::RadioState::PREAMBLE);
         } else {
             iohcRadio::setRadioState(iohcRadio::RadioState::RX);

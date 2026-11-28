@@ -253,6 +253,11 @@ namespace IOHC {
             // COMMAND / STATUS_READ bookkeeping.
             bool is_stop{false};
             bool log_held{false};  // this try holds the frame log
+            // Diagnostic: reception counters at the try's start and at our answer.
+            uint32_t try_preambles_at{0};
+            uint32_t try_frames_at{0};
+            uint32_t answer_preambles_at{0};
+            uint32_t answer_frames_at{0};
         } exchange_;
         bool start_exchange_(ExchangeFor what, const IOHC::address &dst, uint8_t cmd, const uint8_t *data,
                              uint8_t data_len, bool start_frame, bool low_power, const AttemptPlan &plan,

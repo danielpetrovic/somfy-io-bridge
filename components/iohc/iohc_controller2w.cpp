@@ -633,11 +633,21 @@ namespace IOHC {
                 break;
             case ExchangePhase::WAIT_FIRST:
                 release_try_log_();
-                ESP_LOGI(TAG, "Try %u ended: no first response for cmd 0x%02X", exchange_.tries, exchange_.cmd);
+                ESP_LOGI(TAG, "Try %u ended: no first response for cmd 0x%02X (heard %lu preamble(s), %lu frame(s))",
+                         exchange_.tries, exchange_.cmd,
+                         static_cast<unsigned long>(iohcRadio::preambles_detected - exchange_.try_preambles_at),
+                         static_cast<unsigned long>(iohcRadio::frames_completed - exchange_.try_frames_at));
                 next_try_();
                 break;
             case ExchangePhase::WAIT_FINAL:
                 release_try_log_();
+                // After our challenge answer: a preamble with no frame is a
+                // reply that did not arrive intact, no preamble is no reply.
+                ESP_LOGI(TAG, "Try %u: no closing reply after the challenge answer for cmd 0x%02X (heard %lu "
+                              "preamble(s), %lu frame(s) since the answer)",
+                         exchange_.tries, exchange_.cmd,
+                         static_cast<unsigned long>(iohcRadio::preambles_detected - exchange_.answer_preambles_at),
+                         static_cast<unsigned long>(iohcRadio::frames_completed - exchange_.answer_frames_at));
                 try_ended_unconfirmed_();
                 break;
         }
@@ -709,6 +719,9 @@ namespace IOHC {
     void IOHCController2W::transmit_try_() {
         Exchange &x = exchange_;
         hold_try_log_();
+        // Diagnostic: what the receiver heard during this try.
+        x.try_preambles_at = iohcRadio::preambles_detected;
+        x.try_frames_at = iohcRadio::frames_completed;
         x.tries++;
         x.try_preamble = preamble_for_try_(x.tries);
         // End frames are only ever the device's: every request here opens or
@@ -752,6 +765,8 @@ namespace IOHC {
         iohcPacket *reply = build_request_(x.dst, CMD_CHALLENGE_RESP, answer, sizeof(answer), false, false, true);
         const uint8_t frame_len = reply->buffer_length;
         x.saw_challenge = true;
+        x.answer_preambles_at = iohcRadio::preambles_detected;
+        x.answer_frames_at = iohcRadio::frames_completed;
         x.phase = ExchangePhase::WAIT_FINAL;
         x.due_ms = esphome::millis() + 0x7FFFFFFF;
         send_at_once_(reply, x.request_freq, RESPONSE_PREAMBLE_BYTES);

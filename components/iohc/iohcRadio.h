@@ -89,6 +89,11 @@ namespace IOHC {
             volatile static RadioState radioState;
             static void tickerCounter(iohcRadio *radio);
             static volatile bool txComplete;
+            // Reception counters, counted in the interrupt since boot: preambles
+            // detected, and complete frames (the chip signals one only when its
+            // CRC is right; a frame with a bad CRC leaves only its preamble).
+            static volatile uint32_t preambles_detected;
+            static volatile uint32_t frames_completed;
             //static void setPreambleLength(uint16_t preambleLen);
 
             // Minimum gap enforced between the start of one queued send batch
