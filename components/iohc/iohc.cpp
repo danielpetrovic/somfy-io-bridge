@@ -103,13 +103,17 @@ void IOHCComponent::maybe_hop_() {
   }
 
   // A frame whose sync word arrived holds the channel, bounded by
-  // RX_HOP_HOLDOFF_US so a sync with no frame behind it cannot wedge the hop.
+  // RX_HOP_HOLDOFF_US so a sync with no frame behind it cannot wedge the hop
+  // (reception_in_progress()). That bound is the hop's: a held plan (an
+  // exchange's listen on its request channel) has no hop to unblock and,
+  // like that component's holding listen, leaves a reception alone, however
+  // long the frame takes to be read.
   if (state == IOHC::iohcRadio::RadioState::PAYLOAD) {
     preamble_hold_active_ = false;
     awaiting_redetect_ = false;
     if (sync_since_us_ == 0) {
       sync_since_us_ = now;
-    } else if (now - sync_since_us_ >= RX_HOP_HOLDOFF_US) {
+    } else if (rotating && now - sync_since_us_ >= RX_HOP_HOLDOFF_US) {
       IOHC::iohcRadio::getInstance()->recover_rx();
       stale_recoveries_++;
       sync_since_us_ = 0;
