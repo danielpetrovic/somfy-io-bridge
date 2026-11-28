@@ -51,6 +51,12 @@ namespace IOHC {
     static constexpr uint32_t RESPONSE_START_WAIT_MS = 400;   // first reply to a START frame
     static constexpr uint32_t RESPONSE_WAIT_MS = 500;         // first reply to a continuation; the final reply
     static constexpr uint32_t EXCHANGE_EARLY_RESPONSE_WAIT_MS = 200;
+    // A blocking listen returns as soon as a frame arrives; with none, it
+    // wakes this often to run the receiver's hop (5 ms slices on a rotating
+    // listen), queued sends and the watchdog.
+    static constexpr uint32_t EXCHANGE_LISTEN_SLICE_MS = 1;
+    // Upper bound for one 0x72 copy to leave the radio (about 8 ms of air time).
+    static constexpr uint32_t STATUS_UPDATE_ACK_TX_WAIT_MS = 100;
     static constexpr uint32_t EXCHANGE_RETRY_DELAY_MS = 250;
     static constexpr uint32_t EXCHANGE_TOTAL_BUDGET_MS = 2500;
     static constexpr uint32_t EXCHANGE_ATTEMPT_OVERHEAD_MS = 10;
@@ -68,6 +74,13 @@ namespace IOHC {
     static constexpr uint32_t DEFAULT_SETTLE_POLL_DELAY_MS = 3000;
     static constexpr uint32_t STOP_SETTLE_POLL_CAP_MS = 1000;
     static constexpr uint32_t MAX_TRACKED_STATUS_POLL_WINDOW_MS = 240000;
+    // The entity's initial status request (INITIAL_STATUS_REQUEST_DELAY_MS).
+    static constexpr uint32_t INITIAL_STATUS_REQUEST_DELAY_MS = 5000;
+    // Status refresh at rest (periodic_poll_policy.h): first refresh 15 to 45 s
+    // after boot, then the interval with up to 10 % either way.
+    static constexpr uint32_t PERIODIC_POLL_INITIAL_DELAY_MS = 15000;
+    static constexpr uint32_t PERIODIC_POLL_INITIAL_SPREAD_MS = 30000;
+    static constexpr uint32_t PERIODIC_POLL_JITTER_PERCENT = 10;
     static constexpr uint32_t PREDICTED_END_MARGIN_MS = 1000;
     static constexpr uint32_t PRIVATE_RESPONSE_REMAINING_TIME_BIAS_MS = 1000;
     static constexpr std::array<uint32_t, 5> SILENT_RETRY_LADDER_MS{5000, 15000, 30000, 60000, 300000};
@@ -180,6 +193,16 @@ namespace IOHC {
         if (cap_for_stop)
             delay = std::min(delay, STOP_SETTLE_POLL_CAP_MS);
         return delay;
+    }
+
+    static uint32_t periodic_poll_first_delay_ms(uint32_t random) {
+        return PERIODIC_POLL_INITIAL_DELAY_MS + (random % (PERIODIC_POLL_INITIAL_SPREAD_MS + 1));
+    }
+
+    static uint32_t periodic_poll_jittered_interval_ms(uint32_t interval_ms, uint32_t random) {
+        const uint64_t jitter = static_cast<uint64_t>(interval_ms) * PERIODIC_POLL_JITTER_PERCENT / 100;
+        const uint64_t offset = (static_cast<uint64_t>(random) * 2 * jitter) / UINT32_MAX;  // 0 .. 2 * jitter
+        return static_cast<uint32_t>(interval_ms - jitter + offset);
     }
 
     template<size_t N> static uint32_t ladder_step(const std::array<uint32_t, N> &ladder, uint8_t failures) {
@@ -552,6 +575,68 @@ namespace IOHC {
         exchange_.tries_allowed = plan.max_attempts;
         exchange_.begin_ms = esphome::millis();
         next_try_();
+        run_exchange_();
+        return true;
+    }
+
+    void IOHCController2W::run_exchange_() {
+        // send_and_receive(): the exchange listens for its replies itself
+        // until it ends. Its completion handler can start the next exchange,
+        // which runs to its end inside this one.
+        // A frame the exchange does not take is only overheard (RSSI, passive
+        // status), like that component's report_overheard_(): the 2W
+        // controller does not act on it afterwards.
+        while (exchange_.active) {
+            radio_->startQueuedSend();
+            if (owner_ != nullptr) owner_->service_hop();
+            const uint32_t now = esphome::millis();
+            if (time_reached(now, exchange_.due_ms)) {
+                on_exchange_timeout_();
+                continue;
+            }
+            const uint32_t wait_ms = std::min<uint32_t>(exchange_.due_ms - now, EXCHANGE_LISTEN_SLICE_MS);
+            iohcPacket frame;
+            if (owner_ == nullptr || !owner_->wait_for_frame(frame, wait_ms)) continue;
+            exchange_frame_(&frame);
+            if (owner_ != nullptr) owner_->defer_frame(frame, true);
+        }
+    }
+
+    void IOHCController2W::on_exchange_timeout_() {
+        switch (exchange_.phase) {
+            case ExchangePhase::GAP:
+                transmit_try_();
+                break;
+            case ExchangePhase::WAIT_FIRST:
+                ESP_LOGI(TAG, "Try %u ended: no first response for cmd 0x%02X", exchange_.tries, exchange_.cmd);
+                next_try_();
+                break;
+            case ExchangePhase::WAIT_FINAL:
+                try_ended_unconfirmed_();
+                break;
+        }
+    }
+
+    bool IOHCController2W::exchange_frame_(IOHC::iohcPacket *packet) {
+        if (!from_device_to_us_(packet, exchange_.dst)) return false;
+        if (exchange_.phase == ExchangePhase::GAP) return false;
+        const uint8_t cmd = packet->payload.packet.header.cmd;
+        const uint8_t *data = packet->payload.buffer + sizeof(_header);
+        const uint8_t data_len = packet->buffer_length > sizeof(_header)
+                                     ? static_cast<uint8_t>(packet->buffer_length - sizeof(_header))
+                                     : 0;
+        if (exchange_.phase == ExchangePhase::WAIT_FIRST && cmd == CMD_CHALLENGE_REQ) {
+            if (data_len != 6) {
+                exchange_.due_ms = esphome::millis();  // cannot be answered: the try ends
+                return true;
+            }
+            answer_challenge_(data);
+            return true;
+        }
+        exchange_.reply_cmd = cmd;
+        exchange_.reply_len = std::min<uint8_t>(data_len, sizeof(exchange_.reply_data));
+        memcpy(exchange_.reply_data, data, exchange_.reply_len);
+        end_exchange_(ExchangeOutcome::SUCCESS_WITH_RESPONSE);
         return true;
     }
 
@@ -590,8 +675,7 @@ namespace IOHC {
         iohcPacket *packet = build_request_(x.dst, x.cmd, x.data, x.data_len, x.start_frame, false, x.low_power);
         const uint8_t frame_len = packet->buffer_length;
         const uint32_t window = x.plan.window_for_attempt(x.tries, x.tries_allowed);
-        // The wait state is set before the frame goes out (replies are handled
-        // on the main loop, after this function returns).
+        // The wait state is set before the frame goes out.
         x.phase = ExchangePhase::WAIT_FIRST;
         x.due_ms = esphome::millis() + 0x7FFFFFFF;
         if (x.start_frame) {
@@ -778,6 +862,7 @@ namespace IOHC {
         listen_on_(CHANNEL2);  // dwell on CH2 before discovery hopping begins
         step_due_ms_ = esphome::millis() + PAIRING_DISCOVERY_INITIAL_DWELL_MS;
         step_ = PairStep::DISCOVERY_DWELL;
+        run_job_();
     }
 
     void IOHCController2W::pair_device(const std::string &device_id_hex) {
@@ -810,6 +895,7 @@ namespace IOHC {
         ESP_LOGI(TAG, "Pairing %s (%s) directly; it must have its pairing window open", addr_str(device_, buf),
                  declared->get_name().c_str());
         start_key_round_(1);
+        run_job_();
     }
 
     void IOHCController2W::send_discovery_attempt_(uint8_t attempt) {
@@ -960,6 +1046,7 @@ namespace IOHC {
     void IOHCController2W::scan_paired_devices() {
         if (!start_job_(PairJob::SCAN, "Scan Paired Devices: roll-call under this bridge's key...")) return;
         send_roll_call_attempt_();
+        run_job_();
     }
 
     void IOHCController2W::send_roll_call_attempt_() {
@@ -1044,6 +1131,25 @@ namespace IOHC {
         run_pending_work_();
     }
 
+    void IOHCController2W::register_cover(const IOHC::address &motor, esphome::iohc::IOHCCover *cover, bool low_power,
+                                          uint32_t refresh_interval_ms) {
+        Session2W &s = sessions_[pack_address(motor)];
+        s.cover = cover;
+        s.low_power = low_power;
+        const uint32_t now = esphome::millis();
+        s.boot_read_ms = now + INITIAL_STATUS_REQUEST_DELAY_MS;
+        if (s.boot_read_ms == 0) s.boot_read_ms = 1;
+        s.refresh_interval_ms = refresh_interval_ms;
+        s.next_refresh_ms = refresh_interval_ms != 0 ? now + periodic_poll_first_delay_ms(esp_random()) : 0;
+        if (refresh_interval_ms != 0 && s.next_refresh_ms == 0) s.next_refresh_ms = 1;
+    }
+
+    void IOHCController2W::note_status_reported_(Session2W &s) {
+        if (s.refresh_interval_ms == 0) return;
+        s.next_refresh_ms = esphome::millis() + periodic_poll_jittered_interval_ms(s.refresh_interval_ms, esp_random());
+        if (s.next_refresh_ms == 0) s.next_refresh_ms = 1;
+    }
+
     void IOHCController2W::run_pending_work_() {
         if (exchange_.active || job_ != PairJob::NONE) return;
         for (auto &kv : sessions_) {
@@ -1061,6 +1167,31 @@ namespace IOHC {
                              static_cast<uint8_t>(kv.first)};
             start_status_read_(to, s);
             return;
+        }
+        // Background reads last: the read after boot, then the refresh at
+        // rest, only for a cover whose Mode is Two-Way.
+        for (auto &kv : sessions_) {
+            Session2W &s = kv.second;
+            const bool two_way =
+                s.cover != nullptr && s.cover->get_mode() == esphome::iohc::IOHCCover::Mode::TWO_WAY;
+            IOHC::address to{static_cast<uint8_t>(kv.first >> 16), static_cast<uint8_t>(kv.first >> 8),
+                             static_cast<uint8_t>(kv.first)};
+            if (s.boot_read_ms != 0 && time_reached(now, s.boot_read_ms)) {
+                s.boot_read_ms = 0;
+                if (!two_way) continue;
+                start_status_read_(to, s);
+                return;
+            }
+            if (s.next_refresh_ms != 0 && time_reached(now, s.next_refresh_ms)) {
+                s.next_refresh_ms = now + periodic_poll_jittered_interval_ms(s.refresh_interval_ms, esp_random());
+                if (s.next_refresh_ms == 0) s.next_refresh_ms = 1;
+                if (!two_way) continue;
+                char buf[7];
+                ESP_LOGD(TAG, "Device %s: no status reported for a refresh interval (%lu s): reading it",
+                         addr_str(to, buf), static_cast<unsigned long>(s.refresh_interval_ms / 1000));
+                start_status_read_(to, s);
+                return;
+            }
         }
     }
 
@@ -1200,6 +1331,7 @@ namespace IOHC {
         const uint32_t now = esphome::millis();
         const bool reported_stopped = reads_stopped_by_status_byte(status_byte);
         s.last_status_ms = now;
+        note_status_reported_(s);
         char buf[7];
         addr_str(motor, buf);
 
@@ -1291,12 +1423,61 @@ namespace IOHC {
             build_request_(inbound_.src, CMD_CHALLENGE_REQ, inbound_.challenge, sizeof(inbound_.challenge), false,
                            false, false);
         const uint8_t frame_len = challenge->buffer_length;
-        inbound_.due_ms = esphome::millis() + 0x7FFFFFFF;
         send_at_once_(challenge, inbound_.freq, RESPONSE_PREAMBLE_BYTES);
         inbound_.due_ms = esphome::millis() + tx_time_ms_(RESPONSE_PREAMBLE_BYTES, frame_len) + RESPONSE_WAIT_MS;
+
+        // challenge_sender(): wait for the device's answer, then acknowledge.
+        char buf[7];
+        addr_str(inbound_.src, buf);
+        bool verified = false;
+        while (inbound_.active && !verified) {
+            radio_->startQueuedSend();
+            if (owner_ != nullptr) owner_->service_hop();
+            const uint32_t now = esphome::millis();
+            if (time_reached(now, inbound_.due_ms)) {
+                ESP_LOGW(TAG, "Status update from %s: no challenge answer", buf);
+                inbound_.active = false;
+                break;
+            }
+            const uint32_t wait_ms = std::min<uint32_t>(inbound_.due_ms - now, EXCHANGE_LISTEN_SLICE_MS);
+            iohcPacket frame;
+            if (owner_ == nullptr || !owner_->wait_for_frame(frame, wait_ms)) continue;
+            const bool answer = from_device_to_us_(&frame, inbound_.src) &&
+                                frame.payload.packet.header.cmd == CMD_CHALLENGE_RESP;
+            if (answer) {
+                const uint8_t len = frame.buffer_length > sizeof(_header)
+                                        ? static_cast<uint8_t>(frame.buffer_length - sizeof(_header))
+                                        : 0;
+                verified = on_status_update_answer_(frame.payload.buffer + sizeof(_header), len);
+                if (!verified) inbound_.active = false;
+            }
+            owner_->defer_frame(frame, true);
+        }
+        if (verified) {
+            // 0x72: final frame, low-power set, response preamble, on all three
+            // channels one after the other.
+            for (const uint32_t freq : inbound_.ack_order) {
+                wait_tx_idle_(STATUS_UPDATE_ACK_TX_WAIT_MS);
+                iohcPacket *ack = build_request_(inbound_.src, CMD_STATUS_UPDATE_RESP, STATUS_UPDATE_ACK_PAYLOAD,
+                                                 sizeof(STATUS_UPDATE_ACK_PAYLOAD), false, true, true);
+                send_at_once_(ack, freq, RESPONSE_PREAMBLE_BYTES);
+            }
+            wait_tx_idle_(STATUS_UPDATE_ACK_TX_WAIT_MS);
+        }
+        inbound_.active = false;
+        if (!exchange_.active && job_ == PairJob::NONE && owner_ != nullptr) owner_->release_hop_plan();
+        if (verified) apply_inbound_update_();
     }
 
-    void IOHCController2W::on_status_update_answer_(const uint8_t *data, uint8_t data_len) {
+    void IOHCController2W::wait_tx_idle_(uint32_t timeout_ms) {
+        const uint32_t begin = esphome::millis();
+        while (!radio_->tx_idle() && esphome::millis() - begin < timeout_ms) {
+            radio_->startQueuedSend();
+            esphome::delay(1);
+        }
+    }
+
+    bool IOHCController2W::on_status_update_answer_(const uint8_t *data, uint8_t data_len) {
         char buf[7];
         addr_str(inbound_.src, buf);
         std::vector<uint8_t> update(inbound_.update, inbound_.update + inbound_.update_len);
@@ -1304,11 +1485,9 @@ namespace IOHC {
         iohcCrypto::build_challenge_answer(CMD_STATUS_UPDATE, update, inbound_.challenge, system_key_, expected);
         if (data_len < 6 || memcmp(expected, data, 6) != 0) {
             ESP_LOGW(TAG, "Status update from %s: challenge answer does not verify under this bridge's key", buf);
-            inbound_.active = false;
-            return;
+            return false;
         }
-        // Acknowledge on all three channels, the receive channel first; the
-        // copies go out from loop(), one after the other.
+        // Acknowledge on all three channels, the receive channel first.
         const std::array<uint32_t, 3> order{CHANNEL1, CHANNEL2, CHANNEL3};
         inbound_.ack_order = {inbound_.freq, 0, 0};
         size_t next = 1;
@@ -1316,9 +1495,12 @@ namespace IOHC {
             if (freq != inbound_.freq && next < 3) inbound_.ack_order[next++] = freq;
         }
         if (next < 3) inbound_.ack_order = order;  // receive channel not one of the three
-        inbound_.acks_sent = 0;
-        inbound_.due_ms = esphome::millis();
+        return true;
+    }
 
+    void IOHCController2W::apply_inbound_update_() {
+        char buf[7];
+        addr_str(inbound_.src, buf);
         // Apply the update: an EVENT_STATUS_CHANGE carries the position.
         const uint8_t *d = inbound_.update;
         const uint8_t len = inbound_.update_len;
@@ -1338,51 +1520,32 @@ namespace IOHC {
     // --- loop / handle_frame ---
 
     void IOHCController2W::loop() {
+        // Exchanges, status-update authentications and pairing jobs run to
+        // their end where they start; nothing of theirs is left for loop().
+        if (inbound_.active || exchange_.active || job_ != PairJob::NONE) return;
+        run_pending_work_();
+    }
+
+    void IOHCController2W::run_job_() {
+        // The pairing engine's listens: each step waits for its frames itself,
+        // the receiver hopping as the step's plan says, until the job ends.
+        while (job_ != PairJob::NONE) {
+            radio_->startQueuedSend();
+            if (owner_ != nullptr) owner_->service_hop();
+            const uint32_t now = esphome::millis();
+            if (step_ != PairStep::EXCHANGE && time_reached(now, step_due_ms_)) {
+                on_step_due_();
+                continue;
+            }
+            iohcPacket frame;
+            if (owner_ == nullptr || !owner_->wait_for_frame(frame, EXCHANGE_LISTEN_SLICE_MS)) continue;
+            handle_frame(&frame);
+            owner_->defer_frame(frame, true);
+        }
+    }
+
+    void IOHCController2W::on_step_due_() {
         const uint32_t now = esphome::millis();
-
-        if (inbound_.active && time_reached(now, inbound_.due_ms)) {
-            if (inbound_.acks_sent == 0 && inbound_.ack_order[0] == 0) {
-                char buf[7];
-                ESP_LOGW(TAG, "Status update from %s: no challenge answer", addr_str(inbound_.src, buf));
-                inbound_.active = false;
-            } else if (radio_->tx_idle()) {
-                // 0x72: final frame, low-power set, response preamble.
-                iohcPacket *ack = build_request_(inbound_.src, CMD_STATUS_UPDATE_RESP, STATUS_UPDATE_ACK_PAYLOAD,
-                                                 sizeof(STATUS_UPDATE_ACK_PAYLOAD), false, true, true);
-                send_at_once_(ack, inbound_.ack_order[inbound_.acks_sent], RESPONSE_PREAMBLE_BYTES);
-                inbound_.acks_sent++;
-                if (inbound_.acks_sent >= 3) {
-                    inbound_.active = false;
-                    if (!exchange_.active && job_ == PairJob::NONE && owner_ != nullptr) owner_->release_hop_plan();
-                }
-            }
-            return;
-        }
-        if (inbound_.active) return;
-
-        if (exchange_.active && time_reached(now, exchange_.due_ms)) {
-            switch (exchange_.phase) {
-                case ExchangePhase::GAP:
-                    transmit_try_();
-                    break;
-                case ExchangePhase::WAIT_FIRST:
-                    ESP_LOGI(TAG, "Try %u ended: no first response for cmd 0x%02X", exchange_.tries, exchange_.cmd);
-                    next_try_();
-                    break;
-                case ExchangePhase::WAIT_FINAL:
-                    try_ended_unconfirmed_();
-                    break;
-            }
-            return;
-        }
-        if (exchange_.active) return;
-
-        if (job_ == PairJob::NONE) {
-            run_pending_work_();
-            return;
-        }
-        if (step_ == PairStep::EXCHANGE || !time_reached(now, step_due_ms_)) return;
-
         switch (step_) {
             case PairStep::DISCOVERY_DWELL:
                 send_discovery_attempt_(1);
@@ -1433,6 +1596,8 @@ namespace IOHC {
                 break;
 
             default:
+                // No step has a wait pending: end the job rather than block.
+                finish_job_("stopped: no pairing step pending");
                 break;
         }
     }
@@ -1480,35 +1645,15 @@ namespace IOHC {
                                      ? static_cast<uint8_t>(packet->buffer_length - sizeof(_header))
                                      : 0;
 
-        // A device's status update to us, and the answer to our challenge of it.
-        if (inbound_.active && inbound_.ack_order[0] == 0 && from_device_to_us_(packet, inbound_.src) &&
-            cmd == CMD_CHALLENGE_RESP) {
-            on_status_update_answer_(data, data_len);
-            return true;
-        }
+        // A device's status update to us (authenticated in on_status_update_()).
         if (cmd == CMD_STATUS_UPDATE && !exchange_.active && job_ == PairJob::NONE &&
             memcmp(packet->payload.packet.header.target, controller_address_, sizeof(IOHC::address)) == 0) {
             on_status_update_(packet, data, data_len);
             return true;
         }
 
-        // The running exchange: a frame from its destination to us.
-        if (exchange_.active && from_device_to_us_(packet, exchange_.dst)) {
-            if (exchange_.phase == ExchangePhase::GAP) return false;
-            if (exchange_.phase == ExchangePhase::WAIT_FIRST && cmd == CMD_CHALLENGE_REQ) {
-                if (data_len != 6) {
-                    exchange_.due_ms = esphome::millis();  // cannot be answered: the try ends
-                    return true;
-                }
-                answer_challenge_(data);
-                return true;
-            }
-            exchange_.reply_cmd = cmd;
-            exchange_.reply_len = std::min<uint8_t>(data_len, sizeof(exchange_.reply_data));
-            memcpy(exchange_.reply_data, data, exchange_.reply_len);
-            end_exchange_(ExchangeOutcome::SUCCESS_WITH_RESPONSE);
-            return true;
-        }
+        // The running exchange takes its frames itself (run_exchange_()).
+        if (exchange_.active) return false;
 
         if (job_ == PairJob::NONE) return false;
         const bool to_us =

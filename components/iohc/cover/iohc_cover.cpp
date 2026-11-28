@@ -83,6 +83,10 @@ void IOHCCover::setup() {
   }
 
   parent_->register_status_cover(this);
+  // Two-Way: the motor's status is read after boot (and refreshed at rest
+  // when status_refresh_interval is set); until then the saved position shows.
+  if (has_motor_address_)
+    parent_->controller2w().register_cover(motor_address_, this, low_power_2w_, status_refresh_interval_ms_);
 
   // Drop the value an earlier version of this component persisted under this
   // key (July 2026): it is stale and nothing reads it any more.
@@ -250,6 +254,14 @@ void IOHCCover::update_real_position_authoritative(float closure_percent) {
 }
 
 void IOHCCover::set_mode(Mode mode) {
+  // Position (1W) estimates from its tracker: start it from the shown
+  // position, or loop() would publish whatever the tracker held before.
+  if (mode == Mode::POSITION && mode_ != Mode::POSITION) {
+    float raw_position = invert_ ? (1.0f - this->position) : this->position;
+    remote_.position_tracker().setPosition(raw_position * 100.0f);
+    remote_.position_tracker().stop();
+    target_position_ = -1.0f;
+  }
   mode_ = mode;
   cover_prefs_.putUChar("mode", static_cast<uint8_t>(mode));
 }
@@ -335,8 +347,11 @@ void IOHCCover::loop() {
     return;
 
   this->position = pos;
-  if (now_idle)
+  if (now_idle) {
     this->current_operation = cover::COVER_OPERATION_IDLE;
+    // The estimate settled: keep it as the last known position.
+    cover_prefs_.putFloat("position", this->position);
+  }
   this->publish_state();
 }
 

@@ -26,9 +26,13 @@
 //   - the cover command path (hub_operations.cpp): the EXECUTE payload, the
 //     confirmation status read and the follow-up reads of a moving device
 //     (hub_status.cpp, status_poll_policy.cpp).
-// That component blocks while it waits; this bridge receives on a separate
-// task, so each wait is a state here, advanced from loop() (timeouts) and
-// handle_frame() (replies). Only one exchange runs at a time, as there.
+// As in that component, an exchange blocks while it waits: it sends a try and
+// then listens for the reply itself (run_exchange_(), its send_and_receive()
+// with wait_for_packet()), answering a challenge at once, until the exchange
+// ends. So do a pairing job's waits (run_job_(), the pairing engine's
+// listens) and the authentication of a device's status update. A frame that
+// arrives meanwhile and is not theirs is only overheard. Only one exchange
+// runs at a time.
 //
 // As in that component, a device is commanded under this bridge's one system
 // key without any per-device "bonded" record: a cover whose Mode is Two-Way is
@@ -123,6 +127,11 @@ namespace IOHC {
         bool stop_settle{false};
         uint8_t status_poll_failures{0};
         uint8_t auth_poll_failures{0};
+        // The read after boot (the entity's initial status request) and the
+        // periodic refresh at rest (status_refresh_interval, 0 = off).
+        uint32_t boot_read_ms{0};       // 0 = done
+        uint32_t refresh_interval_ms{0};
+        uint32_t next_refresh_ms{0};    // 0 = none planned
     };
 
     class IOHCController2W {
@@ -155,6 +164,12 @@ namespace IOHC {
         void send_command(const IOHC::address &to, bool low_power, uint8_t main0, uint8_t main1,
                           esphome::iohc::IOHCCover *cover);
 
+        // A cover with a motor_address, from its setup(): while its Mode is
+        // Two-Way, its status is read after boot and, with a refresh interval,
+        // whenever it has reported none for that long.
+        void register_cover(const IOHC::address &motor, esphome::iohc::IOHCCover *cover, bool low_power,
+                            uint32_t refresh_interval_ms);
+
         // An idle RSSI reading of the channel the receiver sat on (called on
         // every QUIET_LEVEL_READING_EVERY_N_HOPS-th hop, as in laberning's hub).
         void note_idle_reading(uint32_t freq_hz, int16_t level_dbm);
@@ -177,6 +192,10 @@ namespace IOHC {
         void on_discovery_response_(const IOHC::iohcPacket *packet, const uint8_t *data, uint8_t data_len);
         void send_discover_confirm_(uint8_t try_index);
         void start_key_round_(uint8_t round);
+        // Runs the started pairing job to its end (the pairing engine's
+        // blocking listens); on_step_due_() advances a step whose wait ran out.
+        void run_job_();
+        void on_step_due_();
         void key_round_failed_();
         void key_held_();
         void complete_paired_();
@@ -233,6 +252,11 @@ namespace IOHC {
         bool start_exchange_(ExchangeFor what, const IOHC::address &dst, uint8_t cmd, const uint8_t *data,
                              uint8_t data_len, bool start_frame, bool low_power, const AttemptPlan &plan,
                              bool wake_up_channels, uint16_t preamble_override, uint32_t session_freq);
+        // Runs the started exchange to its end (send_and_receive()).
+        void run_exchange_();
+        void on_exchange_timeout_();
+        // A frame for the running exchange: true if it took it.
+        bool exchange_frame_(IOHC::iohcPacket *packet);
         void next_try_();
         void transmit_try_();
         void answer_challenge_(const uint8_t *challenge6);
@@ -265,7 +289,11 @@ namespace IOHC {
         // 0x3D checked under the system key, then the 0x72 acknowledgement on
         // all three channels (the receive channel first), then the update applied.
         void on_status_update_(const IOHC::iohcPacket *packet, const uint8_t *data, uint8_t data_len);
-        void on_status_update_answer_(const uint8_t *data, uint8_t data_len);
+        // True when the device's 0x3D verifies; fills ack_order.
+        bool on_status_update_answer_(const uint8_t *data, uint8_t data_len);
+        void apply_inbound_update_();
+        // Waits until the radio has sent what it was sending.
+        void wait_tx_idle_(uint32_t timeout_ms);
         struct InboundAuth {
             bool active{false};
             IOHC::address src{};
@@ -274,10 +302,11 @@ namespace IOHC {
             uint8_t challenge[6]{};
             uint32_t freq{0};
             uint32_t due_ms{0};
-            uint8_t acks_sent{0};  // 0x72 copies sent after a verified answer (3 in all)
             std::array<uint32_t, 3> ack_order{};
         } inbound_;
         void schedule_poll_failure_(Session2W &s, bool saw_challenge);
+        // Every status a device reports moves its next refresh a whole interval out.
+        void note_status_reported_(Session2W &s);
         void begin_status_poll_tracking_(Session2W &s, uint32_t delay_ms);
 
         // --- Roll-call (roll_call.cpp) ---

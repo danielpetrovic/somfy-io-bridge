@@ -25,7 +25,7 @@ esphome:
   min_version: 2026.11.0
   project:
     name: "danielpetrovic.Somfy IO Bridge"
-    version: "1.0.2-2w11"
+    version: "1.0.2-2w12"
   # The vendored radio stack talks to the SX1276 directly via Arduino's SPI
   # library, and the Phase 2 pairing/command layer persists bonded remote
   # identities via Arduino's Preferences (NVS) library. Neither gets picked
@@ -296,6 +296,7 @@ packages:
       node: !secret io_living_room_shutter_node
       key: !secret io_living_room_shutter_key
       motor_address: !secret io_living_room_shutter_motor_address
+      status_refresh_interval: 5min
   office_shutter_io: !include
     file: somfy-io-cover.yaml
     vars:
@@ -425,7 +426,11 @@ switch:
       - logger.set_level: {level: VERY_VERBOSE, tag: iohc.button}
       - logger.set_level: {level: VERY_VERBOSE, tag: iohc.mode_select}
       - logger.set_level: {level: VERY_VERBOSE, tag: iohc.cover}
-      - logger.set_level: {level: VERY_VERBOSE, tag: iohc.radio}
+      # The radio at DEBUG, not VERY_VERBOSE: its verbose lines (a dozen per
+      # sent frame, four of them before the frame goes out) delay a 2W
+      # exchange's answer past the motor's wait. Frames sent and received are
+      # still logged by iohc.upstream and iohc.packet.
+      - logger.set_level: {level: DEBUG, tag: iohc.radio}
       - logger.set_level: {level: VERY_VERBOSE, tag: iohc.packet}
       - logger.set_level: {level: VERY_VERBOSE, tag: iohc.crypto}
       - logger.set_level: {level: VERY_VERBOSE, tag: iohc.controller2w}

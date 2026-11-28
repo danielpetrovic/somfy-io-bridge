@@ -126,6 +126,7 @@ class IOHCCover : public cover::Cover, public Component {
   // wake-up preamble (laberning's per-device `low_power:`).
   void set_low_power_2w(bool low_power) { low_power_2w_ = low_power; }
   bool low_power_2w() const { return low_power_2w_; }
+  void set_status_refresh_interval_ms(uint32_t ms) { status_refresh_interval_ms_ = ms; }
 
   // Real motor address (6 hex chars) - as assigned by Somfy, NOT this
   // bridge's own 1W virtual remote identity (node/key above, which is a
@@ -201,6 +202,7 @@ class IOHCCover : public cover::Cover, public Component {
   IOHC::address motor_address_{};
   bool has_motor_address_{false};
   bool low_power_2w_{false};
+  uint32_t status_refresh_interval_ms_{0};
   sensor::Sensor *last_rssi_sensor_{nullptr};
 
   // Confirm-and-resend (switch "Confirm And Resend (1W)"). A 1W command gets

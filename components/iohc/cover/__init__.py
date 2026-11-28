@@ -36,6 +36,7 @@ CONF_NODE = "node"
 CONF_KEY = "key"
 CONF_MOTOR_ADDRESS = "motor_address"
 CONF_LOW_POWER = "low_power"
+CONF_STATUS_REFRESH_INTERVAL = "status_refresh_interval"
 CONF_MY_PATTERN = "my_pattern"
 CONF_INVERT = "invert"
 CONF_TRAVEL_TIME_OPEN = "travel_time_open"
@@ -56,6 +57,12 @@ def validate_hex_string(length):
         return value.lower()
 
     return validator
+
+
+def _validate_refresh_interval(value):
+    if 0 < value.total_milliseconds < 60000:
+        raise cv.Invalid("status_refresh_interval must be 0s (off) or at least 1min")
+    return value
 
 
 CONFIG_SCHEMA = cover.cover_schema(IOHCCover, device_class="shutter").extend(
@@ -87,6 +94,15 @@ CONFIG_SCHEMA = cover.cover_schema(IOHCCover, device_class="shutter").extend(
         # wake-up preamble. Same meaning as laberning/home_io_control's
         # per-device `low_power:`; read by 2W commands and pair_device.
         cv.Optional(CONF_LOW_POWER, default=False): cv.boolean,
+        # Two-Way mode: read the motor's status whenever it has reported none
+        # for this long, so a change the bridge did not hear (a Situo, another
+        # controller) shows up within the interval. laberning/home_io_control's
+        # status_refresh_interval: minimum 1 min, 0s (the default) = off. A
+        # low_power motor is woken on every read, so refresh it every hour or
+        # more, or not at all.
+        cv.Optional(CONF_STATUS_REFRESH_INTERVAL, default="0s"): cv.All(
+            cv.positive_time_period_milliseconds, _validate_refresh_interval
+        ),
         # Which real-hardware-confirmed My/Set My wire pattern this motor
         # starts on - see IOHC::RemoteButton::Vent/SetMy's own comments in
         # iohc_remote1w.h for what each does and why both are genuinely
@@ -162,6 +178,7 @@ async def to_code(config):
     if config[CONF_MOTOR_ADDRESS]:
         cg.add(var.set_motor_address(config[CONF_MOTOR_ADDRESS]))
     cg.add(var.set_low_power_2w(config[CONF_LOW_POWER]))
+    cg.add(var.set_status_refresh_interval_ms(config[CONF_STATUS_REFRESH_INTERVAL].total_milliseconds))
 
     my_pattern = config[CONF_MY_PATTERN]
     if my_pattern == "auto":

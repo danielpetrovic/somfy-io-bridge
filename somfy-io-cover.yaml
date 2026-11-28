@@ -31,6 +31,11 @@
 # position tracks reality in Mode::MY - see cover/__init__.py's own comment
 # for the full picture. Leave at 25 unless you've timed this specific
 # cover's real travel with a stopwatch.
+# `low_power` marks a battery motor for Two-Way mode (wake-up preamble).
+# `status_refresh_interval` (Two-Way mode only) reads the motor's status
+# whenever it has reported none for that long, so a move made elsewhere
+# shows up within the interval: "0s" (off) or at least "1min"; "5min" suits
+# a mains motor, a battery motor every hour or more, or not at all.
 substitutions:
   cover_id: "changeme"
   cover_name: "Change Me"
@@ -40,6 +45,7 @@ substitutions:
   broadcast_type: "0"
   motor_address: ""
   low_power: "false"
+  status_refresh_interval: "0s"
   my_pattern: "auto"
   invert: "false"
   travel_time_open: "25"
@@ -62,6 +68,7 @@ cover:
     broadcast_type: ${broadcast_type}
     motor_address: ${motor_address}
     low_power: ${low_power}
+    status_refresh_interval: ${status_refresh_interval}
     my_pattern: ${my_pattern}
     invert: ${invert}
     travel_time_open: ${travel_time_open}

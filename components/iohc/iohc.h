@@ -20,6 +20,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include <atomic>
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -40,6 +41,13 @@ class IOHCComponent : public Component {
   // laberning/home_io_control's loop() reading the radio itself, so the 2W
   // state, the covers and their HA entities are only ever touched by one task.
   bool on_receive(IOHC::iohcPacket *packet);
+
+  // The blocking listen of a 2W exchange (laberning's wait_for_packet()): the
+  // next received frame, waiting up to timeout_ms. A frame the exchange does
+  // not take goes back with defer_frame() and is handled after it, in arrival
+  // order; controller_done marks one the 2W controller has already seen.
+  bool wait_for_frame(IOHC::iohcPacket &out, uint32_t timeout_ms);
+  void defer_frame(const IOHC::iohcPacket &packet, bool controller_done);
 
   // Passive 2W status: every cover registers itself in setup() so that a
   // motor's status answer (cmd 0x04), overheard while another controller such
@@ -94,6 +102,9 @@ class IOHCComponent : public Component {
   // on that same channel for the rest of the session.
   enum class HopPlan : uint8_t { ALL, SKIP_FREQ, HOLD_REQUEST, HOLD_FREQ };
   void set_hop_plan(HopPlan plan, uint32_t freq = 0);
+  // One pass of the receiver's hop, for a blocking listen that keeps loop()
+  // from running.
+  void service_hop() { maybe_hop_(); }
   // Ends a plan set by set_hop_plan(): back to idle listening.
   void release_hop_plan();
 
@@ -117,8 +128,14 @@ class IOHCComponent : public Component {
   bool status_feedback_available() const;
 
  protected:
-  void process_frame_(IOHC::iohcPacket *packet);
+  void process_frame_(IOHC::iohcPacket *packet, bool controller_done = false);
   void drain_received_frames_();
+  struct DeferredFrame {
+    IOHC::iohcPacket packet;
+    bool controller_done;
+  };
+  static constexpr size_t MAX_DEFERRED_FRAMES = 32;
+  std::deque<DeferredFrame> deferred_;
   // Frames received on the CallbackTask, waiting for the main loop.
   static constexpr UBaseType_t RX_QUEUE_DEPTH = 16;
   QueueHandle_t rx_queue_{nullptr};

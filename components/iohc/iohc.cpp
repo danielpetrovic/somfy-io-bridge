@@ -1,6 +1,7 @@
 #include "iohc.h"
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
+#include "esphome/core/application.h"
 #include "cover/iohc_cover.h"
 #include "esp_timer.h"
 #include <type_traits>
@@ -219,10 +220,34 @@ bool IOHCComponent::on_receive(IOHC::iohcPacket *packet) {
   return true;
 }
 
+bool IOHCComponent::wait_for_frame(IOHC::iohcPacket &out, uint32_t timeout_ms) {
+  App.feed_wdt();
+  return xQueueReceive(rx_queue_, &out, pdMS_TO_TICKS(timeout_ms)) == pdPASS;
+}
+
+void IOHCComponent::defer_frame(const IOHC::iohcPacket &packet, bool controller_done) {
+  if (deferred_.size() >= MAX_DEFERRED_FRAMES) {
+    deferred_.pop_front();
+    rx_dropped_.fetch_add(1, std::memory_order_relaxed);
+  }
+  deferred_.push_back(DeferredFrame{packet, controller_done});
+}
+
 void IOHCComponent::drain_received_frames_() {
-  IOHC::iohcPacket packet;
-  while (xQueueReceive(rx_queue_, &packet, 0) == pdPASS)
+  // Frames kept back by an exchange first: they arrived before the queued ones.
+  // A frame handled here can start an exchange that defers more frames.
+  for (;;) {
+    if (!deferred_.empty()) {
+      DeferredFrame frame = deferred_.front();
+      deferred_.pop_front();
+      process_frame_(&frame.packet, frame.controller_done);
+      continue;
+    }
+    IOHC::iohcPacket packet;
+    if (xQueueReceive(rx_queue_, &packet, 0) != pdPASS)
+      break;
     process_frame_(&packet);
+  }
   const uint32_t dropped = rx_dropped_.load(std::memory_order_relaxed);
   if (dropped != rx_dropped_reported_) {
     ESP_LOGW(TAG, "Receive queue full: %lu frames dropped since boot", static_cast<unsigned long>(dropped));
@@ -230,7 +255,7 @@ void IOHCComponent::drain_received_frames_() {
   }
 }
 
-void IOHCComponent::process_frame_(IOHC::iohcPacket *packet) {
+void IOHCComponent::process_frame_(IOHC::iohcPacket *packet, bool controller_done) {
   this->packets_received_++;
 
   ESP_LOGD(TAG, "Frame #%lu received, length=%u, rssi=%.1f dBm", this->packets_received_, packet->buffer_length,
@@ -240,7 +265,8 @@ void IOHCComponent::process_frame_(IOHC::iohcPacket *packet) {
   // while a bonding attempt is armed AND the frame's source matches that
   // attempt's specific target motor (see IOHCController2W::handle_frame()),
   // so this is a cheap no-op in the common case.
-  controller2w_.handle_frame(packet);
+  if (!controller_done)
+    controller2w_.handle_frame(packet);
 
   // "Recover System Key" responder - only ever consumes a frame while
   // armed AND the frame is one of its own (0x28, or 0x2C/0x31/0x32/0x36/0x3C
