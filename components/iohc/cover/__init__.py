@@ -127,7 +127,7 @@ CONFIG_SCHEMA = cover.cover_schema(IOHCCover, device_class="shutter").extend(
         # for Open/Close at the component boundary, and mirrors the
         # position estimate and 2W feedback back to HA-space, so the entity
         # reports the same orientation it accepts - see iohc_cover.cpp's
-        # control()/loop()/update_real_position_authoritative() for the
+        # control()/loop()/on_2w_report() for the
         # full picture of what that touches. This is only a first-boot
         # seed, not a hard lock - the per-cover Invert Direction switch
         # (config entity, components/iohc/switch/) can flip it live from

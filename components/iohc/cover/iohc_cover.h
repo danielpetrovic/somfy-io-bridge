@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include "esphome/core/component.h"
 #include "esphome/components/cover/cover.h"
 #include "esphome/components/sensor/sensor.h"
@@ -134,14 +136,16 @@ class IOHCCover : public cover::Cover, public Component {
   // Name (2W) buttons and Two-Way mode - see README for how to look this up
   // (Overkiz's own unique_id, if you have TaHoma/Connexoon).
   void set_motor_address(const std::string &motor_address_hex);
-  // Phase 3d - called only from IOHCController2W's own send_command()
-  // completion (iohc_controller2w.cpp), never from an unvalidated/passive
-  // source. Allowed to update the cover's real position/current_operation:
-  // the frame it comes from is actively solicited by our own authenticated
-  // command and verified via the live 0x3C/0x3D challenge/response - see
-  // Finding 10's "never let an unvalidated side-channel corrupt the primary
-  // entity" rule, which this deliberately does not fall under.
-  void update_real_position_authoritative(float closure_percent);
+  // A Two-Way report from IOHCController2W: a status poll reply or a
+  // status update, authenticated under this bridge's key (never a passive
+  // source, Finding 10). Closures are motor space (0 open, 100 closed);
+  // nullopt when the report holds none. `moving` is the controller's verdict
+  // (classify_stopped_report()). Sets the position and the direction the way
+  // laberning/home_io_control's on_device_update_() does.
+  void on_2w_report(std::optional<float> current_closure, std::optional<float> target_closure, bool moving);
+  // A Two-Way command did not get through: its predicted movement is withdrawn
+  // (rollback_optimistic()); a failed stop gives back the movement it replaced.
+  void on_2w_command_failed(bool was_stop);
 
   // Passive 2W status (cmd 0x04 answer of a motor, overheard while another
   // controller such as TaHoma polls it; see IOHCComponent::on_receive()).
@@ -203,6 +207,15 @@ class IOHCCover : public cover::Cover, public Component {
   bool has_motor_address_{false};
   bool low_power_2w_{false};
   uint32_t status_refresh_interval_ms_{0};
+  // Two-Way direction (platform_cover.cpp): the last reported closure, the
+  // predicted target of our own command until a report supersedes it, and
+  // the direction a stop replaced.
+  float last_2w_closure_{-1.0f};
+  float predicted_2w_target_{-1.0f};
+  cover::CoverOperation stop_replaced_operation_{cover::COVER_OPERATION_IDLE};
+  bool stop_pending_{false};
+  // Direction of travelling from one closure to another (operation_toward()).
+  cover::CoverOperation operation_toward_(float from_closure, float to_closure) const;
   sensor::Sensor *last_rssi_sensor_{nullptr};
 
   // Confirm-and-resend (switch "Confirm And Resend (1W)"). A 1W command gets

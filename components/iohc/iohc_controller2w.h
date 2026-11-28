@@ -116,6 +116,10 @@ namespace IOHC {
         uint32_t last_status_ms{0};
         bool confirms_execute{false};
         bool reports_remaining_time{false};
+        // The last "stopped" report off its own target (StopCandidate), raw.
+        bool stop_candidate_armed{false};
+        uint16_t stop_candidate_target{0};
+        uint16_t stop_candidate_position{0};
         // A command waiting for the radio (one exchange at a time).
         bool command_pending{false};
         uint8_t pending_main0{0};

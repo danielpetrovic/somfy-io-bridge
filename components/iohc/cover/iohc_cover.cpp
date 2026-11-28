@@ -237,19 +237,62 @@ void IOHCCover::update_last_rssi(float rssi_dbm) {
   }
 }
 
-void IOHCCover::update_real_position_authoritative(float closure_percent) {
-  closure_percent = std::clamp(closure_percent, 0.0f, 100.0f);
-  // closure (0=open/100=closed) -> HA cover convention (0=closed/1=open) -
-  // this comes from the motor's own reported physical state, independent
-  // of which RemoteButton we chose to send, so an inverted cover needs its
-  // own flip here too (Invert Direction), separate from the control()-side
-  // inversion below.
-  float open_percent = invert_ ? (closure_percent / 100.0f) : (1.0f - closure_percent / 100.0f);
-  ESP_LOGI(TAG, "2W command confirmed - real position now %.0f%% open", open_percent * 100.0f);
-  this->position = open_percent;
-  this->current_operation = cover::COVER_OPERATION_IDLE;
+cover::CoverOperation IOHCCover::operation_toward_(float from_closure, float to_closure) const {
+  if (from_closure < 0.0f || to_closure < 0.0f || from_closure == to_closure)
+    return cover::COVER_OPERATION_IDLE;
+  // Closure falls toward open; Invert Direction shows the other way round.
+  const bool opening = invert_ ? (to_closure > from_closure) : (to_closure < from_closure);
+  return opening ? cover::COVER_OPERATION_OPENING : cover::COVER_OPERATION_CLOSING;
+}
+
+void IOHCCover::on_2w_report(std::optional<float> current_closure, std::optional<float> target_closure, bool moving) {
+  const float previous = last_2w_closure_;
+  if (current_closure.has_value()) {
+    const float closure = std::clamp(*current_closure, 0.0f, 100.0f);
+    // closure (0=open/100=closed) -> HA (0=closed/1=open), mirrored by
+    // Invert Direction like control().
+    this->position = invert_ ? (closure / 100.0f) : (1.0f - closure / 100.0f);
+    cover_prefs_.putFloat("position", this->position);
+    // A decoded position is the observation the prediction stood in for.
+    predicted_2w_target_ = -1.0f;
+  }
+  const float target = target_closure.has_value() ? std::clamp(*target_closure, 0.0f, 100.0f) : predicted_2w_target_;
+  const float current = current_closure.has_value() ? std::clamp(*current_closure, 0.0f, 100.0f) : -1.0f;
+
+  if (!moving) {
+    this->current_operation = cover::COVER_OPERATION_IDLE;
+  } else if (target >= 0.0f && current >= 0.0f && target != current) {
+    // Travelling toward a target it reports, from a position it reports.
+    this->current_operation = operation_toward_(current, target);
+  } else if (target >= 0.0f && current < 0.0f) {
+    // Moving, live position withheld: from the last position seen.
+    if (previous != target)
+      this->current_operation = operation_toward_(previous, target);
+  } else if (current >= 0.0f) {
+    // No target, or still its pre-command target: the direction follows a
+    // real change of position, IDLE until there is one.
+    this->current_operation = operation_toward_(previous, current);
+  }
+  if (current >= 0.0f)
+    last_2w_closure_ = current;
+  stop_pending_ = false;
   target_position_ = -1.0f;
-  cover_prefs_.putFloat("position", open_percent);
+  ESP_LOGD(TAG, "%s: Two-Way report, %.0f%% open, %s", LOG_STR_ARG(this->get_log_name()), this->position * 100.0f,
+           this->current_operation == cover::COVER_OPERATION_OPENING   ? "opening"
+           : this->current_operation == cover::COVER_OPERATION_CLOSING ? "closing"
+                                                                        : "idle");
+  this->publish_state();
+}
+
+void IOHCCover::on_2w_command_failed(bool was_stop) {
+  if (was_stop && stop_pending_) {
+    // The stop did not get through: the movement it replaced goes on.
+    this->current_operation = stop_replaced_operation_;
+  } else {
+    this->current_operation = cover::COVER_OPERATION_IDLE;
+  }
+  stop_pending_ = false;
+  predicted_2w_target_ = -1.0f;
   this->publish_state();
 }
 
@@ -397,8 +440,18 @@ void IOHCCover::control(const cover::CoverCall &call) {
       return;
     }
     uint8_t main0, main1 = 0x00;
+    // The shown closure (motor space) the predicted direction starts from.
+    const float shown_closure =
+        last_2w_closure_ >= 0.0f ? last_2w_closure_
+                                 : 100.0f - (invert_ ? (1.0f - this->position) : this->position) * 100.0f;
     if (call.get_stop()) {
       main0 = 0xD2;
+      // apply_optimistic_stop(): shown at rest at once; a failed stop gives
+      // the movement back.
+      stop_replaced_operation_ = this->current_operation;
+      stop_pending_ = true;
+      predicted_2w_target_ = -1.0f;
+      this->current_operation = cover::COVER_OPERATION_IDLE;
     } else if (call.get_position().has_value()) {
       int percent = static_cast<int>(lroundf(*call.get_position() * 100.0f));
       // Same Invert Direction handling as the 1W path below - flip to
@@ -411,9 +464,15 @@ void IOHCCover::control(const cover::CoverCall &call) {
       } else {
         main0 = static_cast<uint8_t>((100 - raw_percent) * 2);
       }
+      // apply_optimistic_target(): the direction toward the commanded
+      // target shows at once, until a report supersedes it.
+      predicted_2w_target_ = static_cast<float>(100 - std::clamp(raw_percent, 0, 100));
+      stop_pending_ = false;
+      this->current_operation = operation_toward_(shown_closure, predicted_2w_target_);
     } else {
       return;
     }
+    this->publish_state();
     parent_->controller2w().send_command(motor_address_, low_power_2w_, main0, main1, this);
     return;
   }

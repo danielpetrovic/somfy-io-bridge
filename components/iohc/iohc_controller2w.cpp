@@ -136,6 +136,9 @@ namespace IOHC {
     static constexpr uint8_t POS_STOP = 0xD2;
     static constexpr uint8_t POS_FAVORITE = 0xD8;
     static constexpr uint16_t STATUS_POS_MAX = 0xC800;
+    // Positions within this many raw units count as the same
+    // (STATUS_POS_TOLERANCE_RAW, has_reached_target_position()).
+    static constexpr uint16_t STATUS_POS_TOLERANCE_RAW = 100;
     // EXECUTE: originator "user remote" and ACEI (level user default << 5 |
     // extended << 1 | valid) = 0x63 (proto_commands.cpp EXECUTE_ACEI).
     static constexpr uint8_t EXECUTE_ORIGINATOR = 0x01;
@@ -175,6 +178,24 @@ namespace IOHC {
     }
 
     static bool time_reached(uint32_t now, uint32_t due) { return static_cast<int32_t>(now - due) >= 0; }
+
+    // ExecutionState (proto_device_model.h): the KLF 200 API's node state.
+    static const char *execution_state_name(uint8_t status_byte) {
+        switch (status_byte & 0x07) {
+            case 0: return "non-executing";
+            case 1: return "execution error";
+            case 2: return "waiting for executing";
+            case 3: return "waiting for power";
+            case 4: return "executing";
+            case 5: return "done";
+            default: return "undefined";
+        }
+    }
+
+    static bool has_reached_target_position(uint16_t target, uint16_t position) {
+        const uint16_t gap = target > position ? target - position : position - target;
+        return gap <= STATUS_POS_TOLERANCE_RAW;
+    }
 
     // Execution state, bits [2:0] of a status byte (proto_device_model.h):
     // 2/3 waiting, 4 executing are moving; 0, 1, 5 are at rest; 6/7 undefined.
@@ -1244,11 +1265,13 @@ namespace IOHC {
         if (answered && exchange_.reply_cmd == CMD_ERROR_RESP) {
             ESP_LOGW(TAG, "2W command to %s refused with 0x%02X", buf,
                      exchange_.reply_len > 0 ? exchange_.reply_data[0] : 0);
+            if (s.cover != nullptr) s.cover->on_2w_command_failed(exchange_.is_stop);
             schedule_poll_failure_(s, exchange_.saw_challenge);
             return;
         }
         if (outcome == ExchangeOutcome::FAILED) {
             ESP_LOGW(TAG, "Command 0x00 failed for device %s: no valid response (tries=%u)", buf, exchange_.tries);
+            if (s.cover != nullptr) s.cover->on_2w_command_failed(exchange_.is_stop);
             schedule_poll_failure_(s, exchange_.saw_challenge);
             return;
         }
@@ -1357,11 +1380,69 @@ namespace IOHC {
         char buf[7];
         addr_str(motor, buf);
 
-        if (target.has_value() && current.has_value()) {
-            ESP_LOGI(TAG, "Device %s: %s, current %.1f%% closed, target %.1f%% closed", buf,
-                     reported_stopped ? "stopped" : "moving", *current / 512.0f, *target / 512.0f);
-            if (*current <= STATUS_POS_MAX && s.cover != nullptr)
-                s.cover->update_real_position_authoritative(*current / 512.0f);
+        // decode_position_report(): only 0x0000-0xC800 is a position; a stop
+        // or named-position code in the target field is no target.
+        const bool decoded = target.has_value() && current.has_value();
+        if (target.has_value() && *target > STATUS_POS_MAX) target.reset();
+        if (current.has_value() && *current > STATUS_POS_MAX) current.reset();
+
+        // settle_stopped_report(): a "stopped" off its own target reads moving
+        // for one more poll, and is taken as at rest once the next report
+        // names the same target and position. With no follow-up poll to
+        // confirm by, the device's own flag stands (classify_stopped_report()).
+        bool at_rest = reported_stopped;
+        bool settling = false;
+        if (decoded) {
+            const bool follow_up_possible = s.poll_deadline_ms != 0 && !time_reached(now, s.poll_deadline_ms);
+            const bool on_target = !target.has_value() || !current.has_value() ||
+                                   has_reached_target_position(*target, *current);
+            const bool confirmed = s.stop_candidate_armed && target.has_value() && current.has_value() &&
+                                   has_reached_target_position(s.stop_candidate_target, *target) &&
+                                   has_reached_target_position(s.stop_candidate_position, *current);
+            bool keeps_candidate = false;
+            if (reported_stopped && !on_target) {
+                if (confirmed) {
+                    keeps_candidate = true;
+                    if (follow_up_possible)
+                        ESP_LOGD(TAG, "Device %s: stopped at %.2f%% again, target %.2f%%: at rest off target", buf,
+                                 *current / 512.0f, *target / 512.0f);
+                } else if (!follow_up_possible) {
+                    keeps_candidate = true;
+                    ESP_LOGD(TAG, "Device %s: reports stopped at %.2f%%, target %.2f%%, no poll to confirm by: taken "
+                                  "as at rest",
+                             buf, *current / 512.0f, *target / 512.0f);
+                } else {
+                    keeps_candidate = true;
+                    settling = true;
+                    at_rest = false;
+                    ESP_LOGD(TAG, "Device %s: reports stopped at %.2f%%, target %.2f%%: confirming with one more poll",
+                             buf, *current / 512.0f, *target / 512.0f);
+                }
+            }
+            if (keeps_candidate) {
+                s.stop_candidate_armed = true;
+                s.stop_candidate_target = *target;
+                s.stop_candidate_position = *current;
+            } else {
+                s.stop_candidate_armed = false;
+            }
+
+            char target_text[12];
+            if (target.has_value())
+                snprintf(target_text, sizeof(target_text), "%.1f%%", *target / 512.0f);
+            else
+                snprintf(target_text, sizeof(target_text), "none");
+            if (current.has_value())
+                ESP_LOGI(TAG, "Device %s: %s (%s), current %.1f%% closed, target %s closed", buf,
+                         at_rest ? "stopped" : "moving", execution_state_name(status_byte), *current / 512.0f,
+                         target_text);
+            else
+                ESP_LOGI(TAG, "Device %s: %s (%s), no position, target %s", buf, at_rest ? "stopped" : "moving",
+                         execution_state_name(status_byte), target_text);
+            if (s.cover != nullptr)
+                s.cover->on_2w_report(current.has_value() ? std::optional<float>(*current / 512.0f) : std::nullopt,
+                                      target.has_value() ? std::optional<float>(*target / 512.0f) : std::nullopt,
+                                      !at_rest);
         }
 
         // The wake belief follows the device's own flag.
@@ -1373,10 +1454,10 @@ namespace IOHC {
         if (trusted_poll && remaining_s.has_value())
             s.moving_until_ms = now + (*remaining_s * 1000u) + PREDICTED_END_MARGIN_MS;
 
-        if (reported_stopped) {
+        if (at_rest) {
             // An EXECUTE's acknowledgement carries no trusted position: its
             // confirmation read still runs.
-            if (trusted_poll || target.has_value()) {
+            if (trusted_poll || decoded) {
                 s.next_poll_ms = 0;
                 s.poll_deadline_ms = 0;
             }
@@ -1393,7 +1474,9 @@ namespace IOHC {
         }
         // A moving device that counts down is read once more, with the
         // settling plan, at the end of its count.
-        if (trusted_poll) s.settling_read = remaining_s.has_value();
+        // The poll that confirms a stop off target is worth several attempts
+        // (set_confirm_stopped()).
+        if (trusted_poll) s.settling_read = remaining_s.has_value() || settling;
         const uint32_t remaining_delay_ms =
             remaining_s.has_value() ? (*remaining_s * 1000u) + PRIVATE_RESPONSE_REMAINING_TIME_BIAS_MS : 0;
         const uint32_t delay_ms = settle_delay_ms(remaining_delay_ms, false);
